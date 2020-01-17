@@ -159,10 +159,11 @@ static void guard_irq_handler(irq_t source, irq_context_t *context) {
 		vid_clear(0, 0, 0);
 		ConsoleInformation *con = GetConsole();
 		
-		for(i = 16; i > 0; i--) {
-			dbglog(DBG_INFO, "%s\n", con->ConsoleLines[i]);
+		if(con != NULL) {
+			for(i = 16; i > 0; i--) {
+				dbglog(DBG_INFO, "%s\n", con->ConsoleLines[i]);
+			}
 		}
-		
 		dbglog(DBG_ERROR, "Unhandled Exception. Reboot after 10 seconds.");
 		
 		//panic("Unhandled IRQ/Exception");
