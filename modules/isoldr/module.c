@@ -427,15 +427,12 @@ void isoldr_exec(isoldr_info_t *info, uint32 addr) {
 	char fn[MAX_FN_LEN];
 	uint8 *loader = NULL;
 
-#ifdef __RETRODREAM__
-    strncpy(fn, "/rd/isoldr/ide.bin", MAX_FN_LEN);
-#else
 	if(info->fs_type[0] == 'e' || info->fs_type[0] == 'r') {
 		snprintf(fn, MAX_FN_LEN, "%s/firmware/%s/%s_%s.bin", getenv("PATH"), lib_get_name(), info->fs_dev, info->fs_type);
 	} else {
 		snprintf(fn, MAX_FN_LEN, "%s/firmware/%s/%s.bin", getenv("PATH"), lib_get_name(), info->fs_dev);
 	}
-#endif
+
 	fd = fs_open(fn, O_RDONLY);
 
 	if(fd == FILEHND_INVALID) {
