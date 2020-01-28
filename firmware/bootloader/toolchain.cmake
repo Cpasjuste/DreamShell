@@ -23,13 +23,14 @@ set(CMAKE_LINKER ${SH_ELF_PREFIX}/bin/sh-elf-ld CACHE FILEPATH "")
 
 set(KOS_INC_PATHS "-I${KOS_BASE}/include -I${KOS_BASE}/kernel/arch/dreamcast/include -I${KOS_BASE}/addons/include -I${KOS_BASE}/../kos-ports/include")
 set(KOS_LIB_PATHS "-L${KOS_BASE}/lib/${KOS_ARCH} -L${KOS_BASE}/addons/lib/${KOS_ARCH} -L${KOS_BASE}/../kos-ports/lib")
-set(KOS_LIBS "-Wl,--start-group -lkallisti -lc -lgcc -Wl,--end-group")
-set(KOS_CFLAGS "-D__DREAMCAST__ -O2 -ml -m4-single-only -ffunction-sections -fdata-sections -D_arch_dreamcast -D_arch_sub_pristine -Wall -g -fno-builtin")
+set(KOS_LIBS "-Wl,--start-group -lkallisti -lc -lgcc -Wl,--end-group" CACHE STRING "KOS_LIBS" FORCE)
+set(KOS_CFLAGS "-D__DREAMCAST__ -O2 -fomit-frame-pointer -ml -m4-single-only -ffunction-sections -fdata-sections -D_arch_dreamcast -D_arch_sub_pristine -Wall -g -fno-builtin")
 
 set(CMAKE_C_FLAGS "${KOS_CFLAGS} ${KOS_INC_PATHS}" CACHE STRING "C flags" FORCE)
+set(CMAKE_C_FLAGS_RELEASE "-O2" CACHE STRING "CMAKE_C_FLAGS_RELEASE" FORCE)
 set(CMAKE_CXX_FLAGS "${KOS_CFLAGS} ${KOS_INC_PATHS} -std=gnu++11 -fno-operator-names -fno-rtti -fno-exceptions" CACHE STRING "C++ flags" FORCE)
 
-set(CMAKE_C_LINK_FLAGS "${KOS_LIB_PATHS} ${KOS_LIBS} -T${KOS_BASE}/utils/ldscripts/shlelf.xc ${KOS_LIBS}" CACHE STRING "" FORCE)
+set(CMAKE_C_LINK_FLAGS "${KOS_LIB_PATHS} ${KOS_CFLAGS} -Wl,-Ttext=0x8c010000 -Wl,--gc-sections -nodefaultlibs -T${KOS_BASE}/utils/ldscripts/shlelf.xc" CACHE STRING "" FORCE)
 set(CMAKE_CXX_LINK_FLAGS "${KOS_LIB_PATHS} ${KOS_LIBS} -T${KOS_BASE}/utils/ldscripts/shlelf.xc ${KOS_LIBS}" CACHE STRING "" FORCE)
 
 set(CMAKE_C_LINK_EXECUTABLE "${CMAKE_C_COMPILER} <OBJECTS> ${CMAKE_C_FLAGS} <CMAKE_C_LINK_FLAGS> <LINK_FLAGS> <LINK_LIBRARIES> -o <TARGET>")

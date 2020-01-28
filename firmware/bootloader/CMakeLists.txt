@@ -13,7 +13,7 @@ enable_language(ASM)
 # code
 #############
 file(GLOB SOURCES
-        src/*
+        src/*.c
         ../../src/drivers/rtc.c
         ../../src/drivers/spi.c
         ../../src/drivers/sd.c
@@ -32,8 +32,8 @@ set(INCLUDES
         ../../include
         ../../include/fatfs
         )
-set(CFLAGS -DTARGET_NAME=DreamShell_boot_loader_v2.4 -DVERSION="2.4")
-set(LDFLAGS kosext2fs z kmg)
+set(CFLAGS -DTARGET_NAME=DreamShell_boot_loader_v2.5 -DVERSION="2.5")
+set(LDFLAGS kosext2fs z ${KOS_LIBS})
 
 #############
 # executable
