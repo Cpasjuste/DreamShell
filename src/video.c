@@ -538,6 +538,9 @@ static inline void plx_vert_ifpm3(int flags, float x, float y, float z, uint32 c
 
 void SDL_DS_Blit_Textured() {
 	
+	// TODO: this code crash when using DS with ide/sata and no sdcard
+	// probably a race condition
+	/*
 	if(!first_fade && screen_opacity < 0.9f && plx_fnt) {
 		
 		point_t w;
@@ -553,7 +556,7 @@ void SDL_DS_Blit_Textured() {
 		plx_fcxt_draw(plx_cxt, "Loading...");
 		plx_fcxt_end(plx_cxt);
 	}
-	
+	*/
 	//printf("Draw frame: %d\n", ++frame);
 	
 	if (screen_changed) {

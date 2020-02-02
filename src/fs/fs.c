@@ -381,7 +381,7 @@ int SearchRoot(int pass_cnt) {
 	
 success:
 	fs_close(hnd);
-	
+	// TODO: this seems to break dcload-serial debug
 	if(strncasecmp(getenv("PATH"), "/pc", 3) && DirExists("/pc")) {
 		
 		dbglog(DBG_INFO, "Checking for root directory on /pc\n");
