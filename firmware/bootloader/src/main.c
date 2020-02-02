@@ -82,21 +82,22 @@ static void start_callback(void) {
     }
 }
 
-static void dcload_callback(void) {
+void dc_load_callback(void) {
 
     if (fs_romdisk_mount(RES_PATH, (const uint8 *) romdisk, 0) != 0) {
-        dbgio_dev_select("fb");
+        //dbgio_dev_select("fb");
         dbglog(DBG_INFO, "error: could not mount romdisk\n");
         return;
     }
 
     file_t f = fs_open(RES_PATH"/dcload.bin", O_RDONLY);
     if (f == FILEHND_INVALID) {
-        dbgio_dev_select("fb");
+        //dbgio_dev_select("fb");
         dbglog(DBG_INFO, "error: could not find dcload.bin\n");
         return;
     }
 
+    draw_exit();
     void *bin = fs_mmap(f);
     arch_exec(bin, fs_total(f));
 }
@@ -109,8 +110,9 @@ static void show_boot_message(void) {
 int main(int argc, char **argv) {
 
     cont_btn_callback(0, CONT_START, (cont_btn_callback_t) start_callback);
-    cont_btn_callback(0, CONT_A | CONT_B, (cont_btn_callback_t) start_callback);
+    cont_btn_callback(0, CONT_A | CONT_B, (cont_btn_callback_t) dc_load_callback);
 
+    /*
     if (vid_check_cable() == CT_VGA) {
         vid_set_mode(DM_640x480_VGA, PM_RGB565);
     } else if (flash_get_region() == FLASHROM_REGION_EUROPE) {
@@ -118,6 +120,7 @@ int main(int argc, char **argv) {
     } else {
         vid_set_mode(DM_640x480_NTSC_IL, PM_RGB565);
     }
+    */
 
     menu_run();
 

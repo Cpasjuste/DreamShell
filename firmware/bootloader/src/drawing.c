@@ -5,7 +5,7 @@
 #include <kos.h>
 #include "drawing.h"
 
-static pvr_ptr_t txr_font;
+static pvr_ptr_t font_texture = NULL;
 
 pvr_init_params_t params = {
         {PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_0},
@@ -13,11 +13,12 @@ pvr_init_params_t params = {
 };
 
 static void draw_init_font() {
+
     uint16 *vram;
     int x, y;
 
-    txr_font = pvr_mem_malloc(256 * 256 * 2);
-    vram = (uint16 *) txr_font;
+    font_texture = pvr_mem_malloc(256 * 256 * 2);
+    vram = (uint16 *) font_texture;
 
     for (y = 0; y < 8; y++) {
         for (x = 0; x < 16; x++) {
@@ -28,25 +29,10 @@ static void draw_init_font() {
     }
 }
 
-void draw_init() {
-    pvr_init(&params);
-    draw_init_font();
-}
-
-void draw_start() {
-    pvr_wait_ready();
-    pvr_scene_begin();
-    pvr_list_begin(PVR_LIST_TR_POLY);
-}
-
-void draw_end() {
-    pvr_list_finish();
-    pvr_scene_finish();
-}
-
 /* The following funcs blatantly ripped from libconio =) */
 /* Draw one font character (6x12) */
 static void draw_char(float x1, float y1, float z1, Color color, int c) {
+
     pvr_vertex_t vert;
     int ix, iy;
     float u1, v1, u2, v2;
@@ -54,63 +40,62 @@ static void draw_char(float x1, float y1, float z1, Color color, int c) {
     if (c == ' ')
         return;
 
-    //assert( c > ' ' && c < 127 );
+    if (!(c > ' ' && c < 127))
+        return;
 
-    if (c > ' ' && c < 127) {
+    ix = (c % 16) * 16;
+    iy = (c / 16) * 24;
+    u1 = ix * 1.0f / 256.0f;
+    v1 = iy * 1.0f / 256.0f;
+    u2 = (ix + 12) * 1.0f / 256.0f;
+    v2 = (iy + 24) * 1.0f / 256.0f;
 
-        ix = (c % 16) * 16;
-        iy = (c / 16) * 24;
-        u1 = ix * 1.0f / 256.0f;
-        v1 = iy * 1.0f / 256.0f;
-        u2 = (ix + 12) * 1.0f / 256.0f;
-        v2 = (iy + 24) * 1.0f / 256.0f;
+    vert.flags = PVR_CMD_VERTEX;
+    vert.x = x1;
+    vert.y = y1 + DRAW_FONT_HEIGHT;
+    vert.z = z1;
+    vert.u = u1;
+    vert.v = v2;
+    vert.argb = DRAW_PACK_COLOR(color.a, color.r, color.g, color.b);
+    vert.oargb = 0;
+    pvr_prim(&vert, sizeof(vert));
 
-        vert.flags = PVR_CMD_VERTEX;
-        vert.x = x1;
-        vert.y = y1 + 24;
-        vert.z = z1;
-        vert.u = u1;
-        vert.v = v2;
-        vert.argb = DRAW_PACK_COLOR(color.a, color.r, color.g, color.b);
-        vert.oargb = 0;
-        pvr_prim(&vert, sizeof(vert));
+    vert.x = x1;
+    vert.y = y1;
+    vert.u = u1;
+    vert.v = v1;
+    pvr_prim(&vert, sizeof(vert));
 
-        vert.x = x1;
-        vert.y = y1;
-        vert.u = u1;
-        vert.v = v1;
-        pvr_prim(&vert, sizeof(vert));
+    vert.x = x1 + DRAW_FONT_WIDTH;
+    vert.y = y1 + DRAW_FONT_HEIGHT;
+    vert.u = u2;
+    vert.v = v2;
+    pvr_prim(&vert, sizeof(vert));
 
-        vert.x = x1 + 12;
-        vert.y = y1 + 24;
-        vert.u = u2;
-        vert.v = v2;
-        pvr_prim(&vert, sizeof(vert));
-
-        vert.flags = PVR_CMD_VERTEX_EOL;
-        vert.x = x1 + 12;
-        vert.y = y1;
-        vert.u = u2;
-        vert.v = v1;
-        pvr_prim(&vert, sizeof(vert));
-    }
+    vert.flags = PVR_CMD_VERTEX_EOL;
+    vert.x = x1 + DRAW_FONT_WIDTH;
+    vert.y = y1;
+    vert.u = u2;
+    vert.v = v1;
+    pvr_prim(&vert, sizeof(vert));
 }
 
 /* draw len chars at string */
 void draw_string(float x, float y, float z, Color color, char *str) {
+
     int i, len;
     pvr_poly_cxt_t cxt;
     pvr_poly_hdr_t poly;
 
     pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED,
-                     256, 256, txr_font, PVR_FILTER_NONE);
+                     256, 256, font_texture, PVR_FILTER_NONE);
     pvr_poly_compile(&poly, &cxt);
     pvr_prim(&poly, sizeof(poly));
 
     len = strlen(str);
     for (i = 0; i < len; i++) {
         draw_char(x, y, z, color, str[i]);
-        x += 12;
+        x += DRAW_FONT_WIDTH;
     }
 }
 
@@ -150,4 +135,26 @@ void draw_box_outline(float x, float y, float w, float h, float z, Color color,
 
     draw_box(x - outline_size, y - outline_size, w + (outline_size * 2), h + (outline_size * 2), z - 1, outline_color);
     draw_box(x, y, w, h, z, color);
+}
+
+void draw_init() {
+    pvr_init(&params);
+    draw_init_font();
+}
+
+void draw_exit() {
+    if (font_texture != NULL) {
+        pvr_mem_free(font_texture);
+    }
+}
+
+void draw_start() {
+    pvr_wait_ready();
+    pvr_scene_begin();
+    pvr_list_begin(PVR_LIST_TR_POLY);
+}
+
+void draw_end() {
+    pvr_list_finish();
+    pvr_scene_finish();
 }
