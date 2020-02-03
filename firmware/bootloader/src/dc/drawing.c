@@ -29,8 +29,8 @@ static void draw_init_font() {
     }
 }
 
-/* The following funcs blatantly ripped from libconio =) */
-/* Draw one font character (6x12) */
+/* The following funcs blatantly ripped from libconio */
+/* Draw one font character (12x24) */
 static void draw_char(float x1, float y1, float z1, Color color, int c) {
 
     pvr_vertex_t vert;
@@ -157,4 +157,8 @@ void draw_start() {
 void draw_end() {
     pvr_list_finish();
     pvr_scene_finish();
+}
+
+Vec2 draw_get_screen_size() {
+    return (Vec2) {640, 480};
 }

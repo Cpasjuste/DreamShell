@@ -4,7 +4,7 @@
  * (c)2011-2016 SWAT <http://www.dc-swat.ru>
  */
 
-#include "main.h"
+#include <kos.h>
 
 #define MAXCHUNK 0x200000
 static uint seed;
@@ -77,3 +77,4 @@ void descramble(uint8 *source, uint8 *dest, uint32 size) {
     if (size)
         load(dest, size);
 }
+

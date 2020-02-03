@@ -5,8 +5,6 @@
 #ifndef LOADER_DRAWING_H
 #define LOADER_DRAWING_H
 
-#include <arch/types.h>
-
 #define DRAW_FONT_WIDTH 12
 #define DRAW_FONT_HEIGHT 24
 
@@ -30,8 +28,14 @@ typedef struct rect_t {
     float height;
 } Rect;
 
+typedef struct vec2_t {
+    float x;
+    float y;
+} Vec2;
+
 #define COL_WHITE       (Color) {255, 255, 255, 255}
 #define COL_BLUE        (Color) {54, 70, 93, 255}
+#define COL_RED         (Color) {255, 81, 72, 255}
 #define COL_BLUE_LIGHT  (Color) {178, 226, 249, 255}
 #define COL_YELLOW      (Color) {240, 226, 107, 255}
 
@@ -49,5 +53,7 @@ void draw_box(float x, float y, float w, float h, float z, Color color);
 
 void draw_box_outline(float x, float y, float w, float h, float z,
                       Color color, Color outline_color, float outline_size);
+
+Vec2 draw_get_screen_size();
 
 #endif //LOADER_DRAWING_H

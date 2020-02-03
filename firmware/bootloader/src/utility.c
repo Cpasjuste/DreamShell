@@ -1,99 +1,108 @@
 //
-// Created by cpasjuste on 28/01/2020.
+// Created by cpasjuste on 03/02/2020.
 //
 
-#include <kos.h>
+#include <string.h>
+#include <stdlib.h>
+#include "cross.h"
+#include "utility.h"
 
-int file_exists(const char *fn) {
-    file_t f;
+FileList s_file_list;
 
-    f = fs_open(fn, O_RDONLY);
+void add_file(FileList *list, File *entry, int sort) {
 
-    if (f == FILEHND_INVALID) {
-        return 0;
-    }
+    entry->next = NULL;
+    entry->previous = NULL;
 
-    fs_close(f);
-    return 1;
-}
-
-int dir_exists(const char *dir) {
-    file_t f;
-
-    f = fs_open(dir, O_DIR | O_RDONLY);
-
-    if (f == FILEHND_INVALID) {
-        return 0;
-    }
-
-    fs_close(f);
-    return 1;
-}
-
-char *read_file(const char *file) {
-
-    file_t fd;
-    ssize_t size;
-    char *buffer = NULL;
-
-    fd = fs_open(file, O_RDONLY);
-    if (fd == FILEHND_INVALID) {
-        printf("read_file: can't open %s\n", file);
-        return NULL;
-    }
-
-    size = fs_total(fd);
-    buffer = (char *) malloc(size);
-
-    if (fs_read(fd, buffer, size) != size) {
-        fs_close(fd);
-        free(buffer);
-        printf("read_file: can't read %s\n", file);
-        return NULL;
-    }
-
-    fs_close(fd);
-
-    return buffer;
-}
-
-int flash_get_region() {
-
-    int start, size;
-    uint8 region[6] = {0};
-    region[2] = *(uint8 *) 0x0021A002;
-
-    /* Find the partition */
-    if (flashrom_info(FLASHROM_PT_SYSTEM, &start, &size) < 0) {
-        dbglog(DBG_ERROR, "%s: can't find partition %d\n", __func__, FLASHROM_PT_SYSTEM);
+    if (list->head == NULL) {
+        list->head = entry;
+        list->tail = entry;
     } else {
-        /* Read the first 5 characters of that partition */
-        if (flashrom_read(start, region, 5) < 0) {
-            dbglog(DBG_ERROR, "%s: can't read partition %d\n", __func__, FLASHROM_PT_SYSTEM);
+        if (sort != SORT_NONE) {
+            File *p = list->head;
+            File *previous = NULL;
+
+            while (p != NULL) {
+                // Sort by type
+                if (entry->type < p->type)
+                    break;
+
+                // '..' is always at first
+                if (strcmp(entry->name, "..") == 0)
+                    break;
+
+                if (strcmp(p->name, "..") != 0) {
+                    // Get the minimum length without /
+                    size_t elen = strlen(entry->name);
+                    size_t plen = strlen(p->name);
+                    int len = MIN(elen, plen);
+                    if (entry->name[len - 1] == '/' || p->name[len - 1] == '/')
+                        len--;
+
+                    // Sort by name
+                    if (entry->type == p->type) {
+                        int diff = strncasecmp(entry->name, p->name, (size_t) len);
+                        if (diff < 0 || (diff == 0 && elen < plen)) {
+                            break;
+                        }
+                    }
+                }
+
+                previous = p;
+                p = (File *) p->next;
+            }
+
+            if (previous == NULL) { // Order: entry (new head) -> p (old head)
+                entry->next = (struct File *) p;
+                p->previous = (struct File *) entry;
+                list->head = entry;
+            } else if (previous->next == NULL) { // Order: p (old tail) -> entry (new tail)
+                File *tail = list->tail;
+                tail->next = (struct File *) entry;
+                entry->previous = (struct File *) tail;
+                list->tail = entry;
+            } else { // Order: previous -> entry -> p
+                previous->next = (struct File *) entry;
+                entry->previous = (struct File *) previous;
+                entry->next = (struct File *) p;
+                p->previous = (struct File *) entry;
+            }
+        } else {
+            File *tail = list->tail;
+            tail->next = (struct File *) entry;
+            entry->previous = (struct File *) tail;
+            list->tail = entry;
         }
     }
 
-    if (region[2] == 0x58 || region[2] == 0x30) {
-        return FLASHROM_REGION_JAPAN;
-    } else if (region[2] == 0x59 || region[2] == 0x31) {
-        return FLASHROM_REGION_US;
-    } else if (region[2] == 0x5A || region[2] == 0x32) {
-        return FLASHROM_REGION_EUROPE;
-    } else {
-        dbglog(DBG_ERROR, "%s: Unknown region code %02x\n", __func__, region[2]);
-        return FLASHROM_REGION_UNKNOWN;
+    list->count++;
+}
+
+void free_dir(FileList *list) {
+
+    File *entry = list->head;
+
+    while (entry) {
+        File *next = (File *) entry->next;
+        free(entry);
+        entry = next;
     }
+
+    list->head = NULL;
+    list->tail = NULL;
+    list->count = 0;
 }
 
+File *get_file(int index) {
 
-int is_hacked_bios() {
-    return (*(uint16 *) 0xa0000000) == 0xe6ff;
-}
+    File *file = s_file_list.head;
 
-int is_custom_bios() {
-    return (*(uint16 *) 0xa0000004) == 0x4318;
-}
+    for (int i = 0; i < s_file_list.count; i++) {
+        if (index == i) {
+            return (File *) file->next;
+        }
+        file = (File *) file->next;
+    }
 
-int is_no_syscalls() {
-    return (*(uint16 *) 0xac000100) != 0x2f06;
+    return NULL;
 }
