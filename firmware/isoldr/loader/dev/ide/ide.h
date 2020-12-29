@@ -1,5 +1,6 @@
 /**
- * Copyright (c) 2017 Megavolt85, SWAT <http://www.dc-swat.ru>
+ * Copyright (c) 2014-2020 SWAT <http://www.dc-swat.ru>
+ * Copyright (c) 2017 Megavolt85
  *
  * This file is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -59,7 +60,7 @@ typedef struct ide_device
 {
 	u8  reserved;		// 0 (Empty) or 1 (This Drive really exists).
 	u8  drive;			// 0 (Master Drive) or 1 (Slave Drive).
-	u8  type;			// 0: ATA, 1: ATAPI, 2: SPI.
+	u8  type;			// 0: ATA, 1: ATAPI, 2: SPI (Sega Packet Interface)
 	u16 sign;			// Drive Signature
 	u16 capabilities;	// Features.
 	u32 command_sets;	// Command Sets Supported.
@@ -77,13 +78,18 @@ typedef struct ide_device
 
 
 s32 g1_bus_init(void);
-void g1_dma_abort(void);
-void g1_dma_set_irq_mask(s32 enable);
+
+void g1_dma_set_irq_mask(s32 last_transfer);
+s32 g1_dma_has_irq_mask();
 s32 g1_dma_init_irq(void);
 s32 g1_dma_irq_enabled(void);
+void g1_dma_irq_hide(s32 all);
+void g1_dma_irq_restore(void);
+
+void g1_dma_start(u32 addr, size_t bytes);
+void g1_dma_abort(void);
 s32 g1_dma_in_progress(void);
 u32 g1_dma_transfered(void);
-void g1_dma_start(u32 addr, size_t bytes);
 
 void cdrom_spin_down(u8 drive);
 s32 cdrom_get_status(s32 *status, u8 *disc_type, u8 drive);

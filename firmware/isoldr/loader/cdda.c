@@ -1,13 +1,15 @@
 /**
  * DreamShell ISO Loader
  * CDDA audio playback emulation
- * (c)2014-2016 SWAT <http://www.dc-swat.ru>
+ * (c)2014-2020 SWAT <http://www.dc-swat.ru>
  */
 
 //#define DEBUG 1
 
 #include <main.h>
 #include <mmu.h>
+#include <asic.h>
+#include <exception.h>
 #include <drivers/aica.h>
 #include <arch/irq.h>
 #include <arch/cache.h>
@@ -56,49 +58,164 @@ static const uint8 logs[] = {
 #define AICA_CDDA_CH_LEFT  62
 #define AICA_CDDA_CH_RIGHT 63
 
-/* Timer for checking playback position instead of original channel position */
+/* SPU timer for checking playback position (not used) */
 #define AICA_CDDA_TIMER_ARM 0x2894 /* Timer B */
-#define AICA_CDDA_TIMER_SH4 TMU2
+
+#define G2BUS_FIFO (*(vuint32 *)0xa05f688c)
 
 #define aica_dma_in_progress() AICA_DMA_ADST
 #define aica_dma_wait() do { } while(AICA_DMA_ADST)
 
-/* G2 Bus locking macros */
-#define G2_LOCK(OLD) \
-	do { \
-		OLD = irq_disable(); \
-		AICA_DMA_ADSUSP = 1; \
-		while((*(volatile unsigned int *)0xA05F688C) & 0x20) \
-			; \
-	} while(0)
+static cdda_ctx_t _cdda;
+static cdda_ctx_t *cdda = &_cdda;
 
-#define G2_UNLOCK(OLD) \
-	do { \
-		AICA_DMA_ADSUSP = 0; \
-		irq_restore(OLD); \
-	} while(0)
+cdda_ctx_t *get_CDDA(void) {
+	return &_cdda;
+}
 
+/* G2 Bus locking */
+static void g2_lock(void) {
+	AICA_DMA_ADSUSP = 1;
+	cdda->g2_lock = irq_disable();
+	do { } while(G2BUS_FIFO & 0x20) ;
+}
+
+static void g2_unlock(void) {
+	irq_restore(cdda->g2_lock);
+	AICA_DMA_ADSUSP = 0;
+}
 
 /* When writing to the SPU RAM, this is required at least every 8 32-bit
    writes that you execute */
 static void g2_fifo_wait() {
-	const vuint32 *g2_fifo = (vuint32*)0xa05f688c;
-	
-//	DBGFF(NULL);
-
-	for (int i = 0; i < 0x1800; ++i) {
-		if (!(*g2_fifo & 0x11)) break;
+	for (uint32 i = 0; i < 0x1800; ++i) {
+		if (!(G2BUS_FIFO & 0x11)) {
+			break;
+		}
 	}
 }
 
-static cdda_ctx_t _cdda;
-static cdda_ctx_t *cdda = &_cdda;
+static void aica_dma_irq_disable() {
+	if (*ASIC_IRQ9_MASK & ASIC_NRM_AICA_DMA) {
 
-static void aica_dma_transfer(uint8 *data, uint32 dest, uint32 size);
-static void aica_stop_cdda(void);
+		cdda->irq_index = 9;
+		*ASIC_IRQ9_MASK &= ~ASIC_NRM_AICA_DMA;
 
-cdda_ctx_t *get_CDDA(void) {
-	return &_cdda;
+	} else if (*ASIC_IRQ11_MASK & ASIC_NRM_AICA_DMA) {
+
+		cdda->irq_index = 11;
+		*ASIC_IRQ11_MASK &= ~ASIC_NRM_AICA_DMA;
+
+	} else if (*ASIC_IRQ13_MASK & ASIC_NRM_AICA_DMA) {
+
+		cdda->irq_index = 13;
+		*ASIC_IRQ13_MASK &= ~ASIC_NRM_AICA_DMA;
+
+	} else {
+		cdda->irq_index = 0;
+	}
+}
+
+static void aica_dma_irq_restore() {
+
+	if (cdda->irq_index == 0) {
+		return;
+	} else if (cdda->irq_index == 9) {
+		*ASIC_IRQ9_MASK |= ASIC_NRM_AICA_DMA;
+	} else if (cdda->irq_index == 11) {
+		*ASIC_IRQ11_MASK |= ASIC_NRM_AICA_DMA;
+	} else if (cdda->irq_index == 13) {
+		*ASIC_IRQ13_MASK |= ASIC_NRM_AICA_DMA;
+	}
+
+	cdda->irq_index = 0;
+}
+
+static void aica_dma_transfer(uint8 *data, uint32 dest, uint32 size) {
+	
+	DBGFF("0x%08lx %ld\n", data, size);
+	
+	uint32 addr = (uint32)data;
+	dcache_purge_range(addr, size);
+	addr = addr & 0x0FFFFFFF;
+	
+	AICA_DMA_G2APRO = 0x4659007F;      // Protection code
+	AICA_DMA_ADEN   = 0;               // Disable wave DMA
+	AICA_DMA_ADDIR  = 0;               // To wave memory
+	AICA_DMA_ADTRG  = 0x00000004;      // Initiate by CPU, suspend enabled
+	AICA_DMA_ADSTAR = addr;            // System memory address
+	AICA_DMA_ADSTAG = dest;            // Wave memory address
+	AICA_DMA_ADLEN  = size|0x80000000; // Data size, disable after DMA end
+	AICA_DMA_ADEN   = 1;               // Enable wave DMA
+	AICA_DMA_ADST   = 1;               // Start wave DMA
+}
+
+static void aica_sq_transfer(uint8 *data, uint32 dest, uint32 size) {
+
+	uint32 *d = (uint32 *)(void *)(0xe0000000 | (dest & 0x03ffffe0));
+	uint32 *s = (uint32 *)data;
+
+	/* Set store queue memory area as desired */
+	QACR0 = ((dest >> 26) << 2) & 0x1c;
+	QACR1 = ((dest >> 26) << 2) & 0x1c;
+	
+	/* fill/write queues as many times necessary */
+	size >>= 5;
+	g2_fifo_wait();
+	
+	while(size--) {
+//		g2_fifo_wait();
+		/* prefetch 32 bytes for next loop */
+		__asm__("pref @%0" : : "r"(s + 8));
+		d[0] = s[0];
+		d[1] = s[1];
+		d[2] = s[2];
+		d[3] = s[3];
+		d[4] = s[4];
+		d[5] = s[5];
+		d[6] = s[6];
+		d[7] = s[7];
+		__asm__("pref @%0" : : "r"(d));
+		d += 8;
+		s += 8;
+	}
+}
+
+static void aica_transfer(uint8 *data, uint32 dest, uint32 size) {
+	if (IsoInfo->emu_cdda <= CDDA_MODE_DMA_TMU1) {
+		aica_dma_irq_disable();
+		aica_dma_transfer(data, dest, size);
+	} else {
+		aica_sq_transfer(data, dest, size);
+	}
+}
+
+static int aica_transfer_in_progress() {
+
+	if (IsoInfo->emu_cdda <= CDDA_MODE_DMA_TMU1) {
+		return aica_dma_in_progress();
+	}
+
+	// TODO: SQ
+	return 0;
+}
+
+static void aica_transfer_wait() {
+	if (IsoInfo->emu_cdda <= CDDA_MODE_DMA_TMU1) {
+		aica_dma_wait();
+	} else {
+		/* Wait for both store queues to complete */
+		vuint32 *d = (vuint32 *)0xe0000000;
+		d[0] = d[8] = 0;
+	}
+}
+
+static void aica_transfer_stop() {
+	if (IsoInfo->emu_cdda <= CDDA_MODE_DMA_TMU1) {
+		AICA_DMA_ADEN = 0;
+	} else {
+		// TODO: SQ
+	}
 }
 
 static void setup_pcm_buffer() {
@@ -113,6 +230,7 @@ static void setup_pcm_buffer() {
 	 * 16 KB = 36186 / chn
 	 */
 	cdda->end_tm = 72374 / cdda->chn;
+	size_t old_size = cdda->size;
 //	cdda->size = (cdda->bitsize << 10) * cdda->chn;
 	
 	switch(cdda->bitsize) {
@@ -127,29 +245,63 @@ static void setup_pcm_buffer() {
 		case 16:
 		default:
 			cdda->size = 0x8000;
-#ifdef LOG
-			cdda->size >>= 2;
-			cdda->end_tm >>= 2;
-#endif
 			break;
 	}
 	
-	/* Search free memory area */
-	if((loader_addr > 0x8c010000 && cdda->size <= 0x8000) || (loader_addr <= 0x8c000100 && cdda->size <= 0x4000 && IsoInfo->exec.type != BIN_TYPE_WINCE)) {
-		
-		cdda->buff[0] = (uint8 *)0x8C00C000 - cdda->size;
-		
-	} else if((loader_addr <= 0x8c000100 || loader_addr > 0x8c010000) && IsoInfo->exec.type == BIN_TYPE_WINCE && cdda->size <= 0x8000) {
-		
-		cdda->buff[0] = (uint8 *)0x8c010000 - cdda->size;
+	/* Search free memory area in main RAM */
+	if (IsoInfo->buff_mode >= BUFF_MEM_SPECIFY) {
 
-	} else {
-		cdda->buff[0] = (uint8 *)0x8D000000 - cdda->size - 0x18000;
+		cdda->buff[0] = (uint8 *)(IsoInfo->buff_mode);
+
+	} else if (IsoInfo->buff_mode == BUFF_MEM_DYNAMIC) {
+
+		if (cdda->alloc_buff && old_size != cdda->size) {
+
+			cdda->alloc_buff = realloc(cdda->alloc_buff, cdda->size + 32);
+
+		} else if (cdda->alloc_buff == NULL) {
+
+			cdda->alloc_buff = malloc(cdda->size + 32);
+		}
+
+		if (cdda->alloc_buff) {
+			cdda->buff[0] = (uint8 *)((((uint32)cdda->alloc_buff + 31) / 32) * 32);
+		}
+	}
+
+	if (IsoInfo->buff_mode == BUFF_MEM_STATIC ||
+		(IsoInfo->buff_mode == BUFF_MEM_DYNAMIC && cdda->alloc_buff == NULL)
+	) {
+
+		if(loader_addr > 0x8c010000) {
+
+			if (IsoInfo->exec.type == BIN_TYPE_KATANA) {
+				cdda->buff[0] = (uint8 *)0x8c00c000 - cdda->size;
+			} else {
+				cdda->buff[0] = (uint8 *)0x8c010000 - cdda->size;
+			}
+
+		} else if (loader_addr <= 0x8c000100) {
+
+			if (IsoInfo->exec.type == BIN_TYPE_KATANA) {
+
+				if (cdda->size <= 0x4000) {
+					cdda->buff[0] = (uint8 *)0x8c00c000 - cdda->size;
+				} else {
+					cdda->buff[0] = (uint8 *)(0x8cfe8000 - cdda->size);
+				}
+
+			} else {
+				cdda->buff[0] = (uint8 *)0x8c010000 - cdda->size;
+			}
+		} else {
+			cdda->buff[0] = (uint8 *)(0x8cfe8000 - cdda->size);
+		}
 	}
 	
 	cdda->buff[1] = cdda->buff[0] + (cdda->size >> 1);
 	
-	/* Setup buffer in sound memory */
+	/* Setup buffer at end of sound memory */
 	cdda->aica_left[0] = 0x00A00000 - cdda->size;
 	cdda->aica_left[1] = cdda->aica_left[0] + (cdda->size >> 2);
 	
@@ -167,76 +319,13 @@ static void setup_pcm_buffer() {
 		(uint32)cdda->buff[0], (uint32)cdda->aica_left[0], cdda->size);
 }
 
-
-static void clean_pcm_buffer() {
-	
-	DBGFF(NULL);
-	
-	if(aica_dma_in_progress()) {
-		AICA_DMA_ADEN = 0;
-	}
-
-	/* Wait DMA done */
-	aica_dma_wait();
-
-#if 0
-
-	/* Clean main RAM */
-	memset(cdda->buff[0], 0, cdda->size);
-
-	/**
-	 * FIXME: We can't use direct memory access if MMU enabled,
-	 * because this memory can be mapped.
-	 * The store queue can help, but WinCE doesn't like it.
-	 */
-	if(mmu_enabled()) {
-		return;
-	}
-	
-	size_t count;
-	register uint *d = (unsigned int *)(void *)(0xe0000000 | (cdda->aica_left[0] & 0x03ffffe0));
-//	register vuint32 *d = (vuint32*)cdda->aica_left[0];
-//	register int old;
-
-	/* Set store queue memory area as desired */
-	QACR0 = ((((unsigned int)cdda->aica_left[0]) >> 26) << 2) & 0x1c;
-	QACR1 = ((((unsigned int)cdda->aica_left[0]) >> 26) << 2) & 0x1c;
-
-	/* Fill both store queues with zeroes */
-	d[0] = d[1] = d[2] = d[3] = d[4] = d[5] = d[6] = d[7] =
-		d[8] = d[9] = d[10] = d[11] = d[12] = d[13] = d[14] = d[15] = 0;
-
-	/* Write them as many times necessary */
-	count = cdda->size >> 5;
-	g2_fifo_wait();
-
-	while(count--) {
-//		g2_fifo_wait();
-//		G2_LOCK(old);
-//		d[0] = d[1] = d[2] = d[3] = d[4] = d[5] = d[6] = d[7] = 0;
-//		G2_UNLOCK(old);
-		__asm__("pref @%0" : : "r"(d));
-		d += 8;
-	}
-	
-	cdda->cur_buff = 0;
-
-	/* Wait for both store queues to complete */
-	d = (unsigned int *)0xe0000000;
-	d[0] = d[8] = 0;
-#endif
-}
-
-
 static void aica_set_volume(int volume) {
 
 	uint32 val;
-	int old;
-	
 	cdda->volume = volume;
 
 	g2_fifo_wait();
-	G2_LOCK(old);
+	g2_lock();
 	
 	/* Get original CDDA volume (doesn't work) */
 //	SNDREG32(0x2040) & 0xff00; // Left
@@ -252,9 +341,35 @@ static void aica_set_volume(int volume) {
 		CHNREG32(AICA_CDDA_CH_RIGHT, 40) = val;
 	}
 
-	G2_UNLOCK(old);
+	g2_unlock();
 }
 
+static void aica_stop_cdda(void) {
+	
+	uint32 l, r;
+	LOGFF(NULL);
+	
+	g2_fifo_wait();
+	g2_lock();
+	
+	l = CHNREG32(AICA_CDDA_CH_LEFT,  0);
+	
+	if(cdda->chn > 1) {
+		r = CHNREG32(AICA_CDDA_CH_RIGHT, 0);
+		CHNREG32(AICA_CDDA_CH_RIGHT, 0) = (r & ~0x4000) | 0x8000;
+	}
+	
+	CHNREG32(AICA_CDDA_CH_LEFT,  0) = (l & ~0x4000) | 0x8000;
+	
+	g2_unlock();
+
+	if(aica_transfer_in_progress()) {
+		aica_transfer_stop();
+	}
+
+	/* Wait transfer done */
+	aica_transfer_wait();
+}
 
 static void aica_setup_cdda(int clean) {
 
@@ -275,7 +390,13 @@ static void aica_setup_cdda(int clean) {
 	freq_base = (freq_hi << 11) | (freq_lo & 1023);
 	
 	/* Setup SH4 timer */
-	timer_prime_cdda(AICA_CDDA_TIMER_SH4, cdda->end_tm);
+	if (IsoInfo->emu_cdda == CDDA_MODE_DMA_TMU1 || IsoInfo->emu_cdda == CDDA_MODE_SQ_TMU1) {
+		cdda->timer = TMU1;
+	} else {
+		cdda->timer = TMU2;
+	}
+	
+	timer_prime_cdda(cdda->timer, cdda->end_tm);
 	
 	LOGFF("0x%08lx 0x%08lx %d %d %d %d\n",
 				smp_ptr, (smp_ptr + smp_size), smp_size, 
@@ -284,14 +405,11 @@ static void aica_setup_cdda(int clean) {
 	if(clean) {
 		/* Stop AICA channels */
 		aica_stop_cdda();
-
-		/* Clean PCM buffers */
-		clean_pcm_buffer();
 	}
 	
 	/* Setup AICA channels */
 	g2_fifo_wait();
-	G2_LOCK(freq_hi);
+	g2_lock();
 
 	/* Setup AICA timer */
 //	SNDREG32(AICA_CDDA_TIMER_ARM) = 6 << 8;
@@ -313,12 +431,12 @@ static void aica_setup_cdda(int clean) {
 		CHNREG32(AICA_CDDA_CH_LEFT,  36) = AICA_PAN(128) | (0xf << 8);
 	}
 	
-	G2_UNLOCK(freq_hi);
+	g2_unlock();
 	
 	aica_set_volume(clean ? 255 : 0);
 
 	g2_fifo_wait();
-	G2_LOCK(freq_hi);
+	g2_lock();
 
 	CHNREG32(AICA_CDDA_CH_LEFT,  16) = 0x1f;
 	CHNREG32(AICA_CDDA_CH_LEFT,  4)  = smp_ptr & 0xffff;
@@ -337,52 +455,26 @@ static void aica_setup_cdda(int clean) {
 	if(cdda->chn > 1) {
 		CHNREG32(AICA_CDDA_CH_RIGHT, 0) = val | ((smp_ptr + smp_size) >> 16);
 	}
-	
-	g2_fifo_wait();
-	
-	/* Start SH4 timer */
-	timer_start(AICA_CDDA_TIMER_SH4);
-	
+
 	/* Start AICA timer */
-//	SNDREG32(AICA_CDDA_TIMER_ARM) = 6 << 8 | 0x01;
-	
-	G2_UNLOCK(freq_hi);
-}
+	// SNDREG32(AICA_CDDA_TIMER_ARM) = 6 << 8 | 0x01;
 
-
-static void aica_stop_cdda(void) {
-	
-	int old;
-	uint32 l, r;
-	
-	LOGFF(NULL);
-	
+	g2_unlock();
 	g2_fifo_wait();
-	G2_LOCK(old);
-	
-	l = CHNREG32(AICA_CDDA_CH_LEFT,  0);
-	
-	if(cdda->chn > 1) {
-		r = CHNREG32(AICA_CDDA_CH_RIGHT, 0);
-		CHNREG32(AICA_CDDA_CH_RIGHT, 0) = (r & ~0x4000) | 0x8000;
-	}
-	
-	CHNREG32(AICA_CDDA_CH_LEFT,  0) = (l & ~0x4000) | 0x8000;
-	
-	G2_UNLOCK(old);
-}
 
+	/* Start SH4 timer */
+	timer_start(cdda->timer);
+}
 
 static void aica_check_cdda(void) {
 	
 //	if(!cdda->stat)
 //		return;
-	
-	int old;
+
 	uint32 left_val, right_val;
 	
 	g2_fifo_wait();
-	G2_LOCK(old);
+	g2_lock();
 	
 	left_val = CHNREG32(AICA_CDDA_CH_LEFT, 0);
 	
@@ -392,57 +484,55 @@ static void aica_check_cdda(void) {
 		right_val = cdda->check_val;
 	}
 	
-	G2_UNLOCK(old);
+	g2_unlock();
 	
 	if(!(cdda->check_val & left_val) || !(cdda->check_val & right_val)) {
-		aica_dma_wait();
+		aica_transfer_wait();
 		aica_setup_cdda(0);
 	}
 }
 
-#ifdef LOG
+#if 0
 
-static inline uint8 aica_get_tmval(void) {
-	int old;
+static uint8 aica_get_tmval(void) {
 	uint8 val;
 	
-	G2_LOCK(old);
+	g2_lock();
 	val = SNDREG32(AICA_CDDA_TIMER_ARM) & 0xff;
-	G2_UNLOCK(old);
+	g2_unlock();
 	
 	return val;
 }
 
 
 /* Get channel position */
-static inline int aica_get_pos(void) {
+static int aica_get_pos(void) {
 
-	int p, old;
+	int p;
 	
 	g2_fifo_wait();
 	
 	/* Observe channel ch */
-	G2_LOCK(old);
+	g2_lock();
 	SNDREG32(0x280c) = (SNDREG32(0x280c) & 0xffff00ff) | (AICA_CDDA_CH_LEFT << 8);
-	G2_UNLOCK(old);
+	g2_unlock();
 	
 	g2_fifo_wait();
 	
 	/* Update position counters */
-	G2_LOCK(old);
+	g2_lock();
 	p = SNDREG32(0x2814) & 0xffff;
-	G2_UNLOCK(old);
+	g2_unlock();
 	
 //	LOGFF("%d\n", p);
 
 	return p;
 }
 
-static inline void aica_init(void) {
-	int old = 0;
+static void aica_init(void) {
 	
 	g2_fifo_wait();
-	G2_LOCK(old);
+	g2_lock();
 	
 	SNDREG32(0x2800) = 0x0000;
 	
@@ -465,10 +555,10 @@ static inline void aica_init(void) {
 	/* AICA Timer */
 //	SNDREG32(AICA_CDDA_TIMER_ARM) = 6 << 8 | 0xd4;
 	
-	G2_UNLOCK(old);
+	g2_unlock();
 }
 
-static inline void aica_dma_init(void) {
+static void aica_dma_init(void) {
 	
 	uint32 main_addr = ((uint32)cdda->buff[0]) & 0x0FFFFFFF;
 	uint32 sound_addr = 0x00A00000 - cdda->size;
@@ -483,9 +573,9 @@ static inline void aica_dma_init(void) {
 	AICA_DMA_ADEN   = 1;             // Enable wave DMA
 }
 
-#endif /* LOG */
+#endif
 
-static inline void aica_pcm_split(uint8 *src, uint8 *dst, uint32 size) {
+static void aica_pcm_split(uint8 *src, uint8 *dst, uint32 size) {
 	
 	DBGFF("0x%08lx 0x%08lx %ld\n", src, dst, size);
 	
@@ -512,63 +602,6 @@ static inline void aica_pcm_split(uint8 *src, uint8 *dst, uint32 size) {
 		memcpy(dst, src, size);
 	}
 }
-
-
-static void aica_dma_transfer(uint8 *data, uint32 dest, uint32 size) {
-	
-	DBGFF("0x%08lx %ld\n", data, size);
-	
-	uint32 addr = (uint32)data;
-	dcache_purge_range(addr, size);
-	addr = addr & 0x0FFFFFFF;
-	
-	AICA_DMA_G2APRO = 0x4659007F;      // Protection code
-	AICA_DMA_ADEN   = 0;               // Disable wave DMA
-	AICA_DMA_ADDIR  = 0;               // To wave memory
-	AICA_DMA_ADTRG  = 0x00000004;      // Initiate by CPU, suspend enabled
-	AICA_DMA_ADSTAR = addr;            // System memory address
-	AICA_DMA_ADSTAG = dest;            // Wave memory address
-	AICA_DMA_ADLEN  = size|0x80000000; // Data size, disable after DMA end
-	AICA_DMA_ADEN   = 1;               // Enable wave DMA
-	AICA_DMA_ADST   = 1;               // Start wave DMA
-}
-
-#if 0
-static void aica_sq_transfer(uint8 *data, uint32 dest, uint32 size) {
-
-	uint *d = (uint *)(void *)(0xe0000000 | (dest & 0x03ffffe0));
-	uint *s = (uint *)data;
-
-	/* Set store queue memory area as desired */
-	QACR0 = ((dest >> 26) << 2) & 0x1c;
-	QACR1 = ((dest >> 26) << 2) & 0x1c;
-	
-	/* fill/write queues as many times necessary */
-	size >>= 5;
-	g2_fifo_wait();
-	
-	while(size--) {
-//		g2_fifo_wait();
-		/* prefetch 32 bytes for next loop */
-		__asm__("pref @%0" : : "r"(s + 8));
-		d[0] = s[0];
-		d[1] = s[1];
-		d[2] = s[2];
-		d[3] = s[3];
-		d[4] = s[4];
-		d[5] = s[5];
-		d[6] = s[6];
-		d[7] = s[7];
-		__asm__("pref @%0" : : "r"(d));
-		d += 8;
-		s += 8;
-	}
-
-	/* Wait for both store queues to complete */
-	d = (unsigned int *)0xe0000000;
-	d[0] = d[8] = 0;
-}
-#endif
 
 static void switch_cdda_track(uint8 track) {
 	
@@ -654,18 +687,20 @@ static void stop_clean_cdda() {
 	DBGFF(NULL);
 	
 #ifdef _FS_ASYNC
-//	while(cdda->stat == CDDA_STAT_WAIT) {
-//		poll(cdda->fd);
-//	}
-	if(cdda->stat == CDDA_STAT_WAIT) {
-		abort_async(cdda->fd);
+	while(cdda->stat == CDDA_STAT_WAIT) {
+		if (poll(cdda->fd) < 0) {
+			break;
+		}
 	}
+	// FIXME: Works unstable
+	// if(cdda->stat == CDDA_STAT_WAIT) {
+	// 	abort_async(cdda->fd);
+	// }
 #endif
 
 	cdda->stat = CDDA_STAT_IDLE;
-	aica_dma_wait();
+	aica_transfer_wait();
 	aica_stop_cdda();
-	clean_pcm_buffer();
 }
 
 #if defined(HAVE_EXPT) && !defined(NO_ASIC_LT)
@@ -697,7 +732,7 @@ int CDDA_Init() {
 		cdda->fd = FILEHND_INVALID;
 	}
 	
-#ifdef DEBUG
+#if 0
 	/* It's not need for games (they do it), only for local test */
 	aica_init();
 	aica_dma_init();
@@ -721,19 +756,19 @@ int CDDA_Init() {
 int CDDA_Play(uint8 first, uint8 last, uint16 loop) {
 	
 	gd_state_t *GDS = get_GDS();
-	
+
+	if(!IsoInfo->emu_cdda) {
+		goto end;
+	}
+
 	if(cdda->stat) {
 		stop_clean_cdda();
 	} else if(GDS->cdda_stat == SCD_AUDIO_STATUS_PAUSED && 
 				first == cdda->first && cdda->fd > FILEHND_INVALID) {
 		return CDDA_Release();
 	}
-	
-	if(!IsoInfo->emu_cdda) {
-		
-		goto end;
-		
-	} else if(IsoInfo->image_type == ISOFS_IMAGE_TYPE_CDI) {
+
+	if(IsoInfo->image_type == ISOFS_IMAGE_TYPE_CDI) {
 		
 		if(IsoInfo->cdda_offset[first - 3] > 0) {
 			cdda->offset = IsoInfo->cdda_offset[first - 3] + 2520;
@@ -983,6 +1018,11 @@ int CDDA_Stop(void) {
 			cdda->fd = FILEHND_INVALID;
 		}
 	}
+
+	if (cdda->alloc_buff) {
+		free(cdda->alloc_buff);
+		cdda->alloc_buff = NULL;
+	}
 	
 	GDS->cdda_track = 0;
 	GDS->drv_stat = CD_STATUS_STANDBY;
@@ -1095,32 +1135,30 @@ file_error:
 	return -1;
 }
 
-//#if defined(DEV_TYPE_IDE) || defined(DEV_TYPE_GD)
-//static int dma_check_pass = 0;
-//#endif
 
 void CDDA_MainLoop(void) {
 	
-	if(cdda->stat == CDDA_STAT_IDLE) {
+	DBGFF("%d %d\n", IsoInfo->emu_cdda, cdda->stat);
+
+	if(cdda->stat == CDDA_STAT_IDLE || !IsoInfo->emu_cdda) {
 		return;
 	}
 	
 #ifdef _FS_ASYNC
-	/* Polling async data transfer */
-//#if defined(DEV_TYPE_IDE) || defined(DEV_TYPE_GD)
-//	if(cdda->stat == CDDA_STAT_WAIT) {
-//		if(IsoInfo->exec.type != BIN_TYPE_WINCE && (!g1_dma_irq_enabled() || (!g1_dma_in_progress() && dma_check_pass++))) {
-//
-//			dma_check_pass = 0;
-//
-//			if(poll(cdda->fd) < 0) {
-//				return;
-//			}
-//		}
-//	if(cdda->stat == CDDA_STAT_WAIT && (/*g1_dma_irq_enabled() || */poll(cdda->fd) >= 0)) {
-//# else
-	if(cdda->stat == CDDA_STAT_WAIT && poll(cdda->fd) >= 0) {
-//# endif
+	if(cdda->stat == CDDA_STAT_WAIT) {
+
+		/* Polling async data transfer */
+		if(!IsoInfo->use_irq
+# ifdef HAVE_EXPT
+			|| !exception_inited()
+# endif
+		) {
+			if(poll(cdda->fd) < 0) {
+				/* Retry on error */
+				cdda->stat = CDDA_STAT_FILL;
+			}
+		}
+
 		aica_check_cdda();
 		return;
 	}
@@ -1141,7 +1179,7 @@ void CDDA_MainLoop(void) {
 //		
 //		lseek(cdda->fd, offset, SEEK_SET);
 //		
-//		if(!aica_dma_in_progress()) {
+//		if(!aica_transfer_in_progress()) {
 //			
 //			LOGFF("Read data to 0x%08lx at %ld\n",
 //					(uint32)cdda->buff[PCM_DMA_BUFF], tell(cdda->fd));
@@ -1172,7 +1210,12 @@ void CDDA_MainLoop(void) {
 		
 		aica_check_cdda();
 		
-		if(!aica_dma_in_progress()) {
+		if(!aica_transfer_in_progress()) {
+
+			if(cdda->irq_index) {
+				aica_dma_irq_restore();
+			}
+
 			aica_pcm_split(cdda->buff[PCM_TMP_BUFF], cdda->buff[PCM_DMA_BUFF], cdda->size >> 1);
 			cdda->stat = CDDA_STAT_SNDL;
 		}
@@ -1181,7 +1224,7 @@ void CDDA_MainLoop(void) {
 	/* Send data to AICA */
 	if(cdda->stat == CDDA_STAT_SNDL) {
 		
-		uint32 tm = timer_count(AICA_CDDA_TIMER_SH4);
+		uint32 tm = timer_count(cdda->timer);
 		uint32 ta = cdda->end_tm >> 1;
 //		gd_state_t *GDS = get_GDS();
 //		int pos = aica_get_pos();
@@ -1200,47 +1243,39 @@ void CDDA_MainLoop(void) {
 //			(cdda->cur_buff && atm < 128)) {
 		if((!cdda->cur_buff && tm < ta) || (cdda->cur_buff && tm > ta)) {
 
-			if(!aica_dma_in_progress()) {
+			if(!aica_transfer_in_progress()) {
 
 				if(cdda->chn > 1) {
-//					aica_sq_transfer(cdda->buff[PCM_DMA_BUFF], cdda->aica_left[cdda->cur_buff], cdda->size >> 2);
-					aica_dma_transfer(cdda->buff[PCM_DMA_BUFF], cdda->aica_left[cdda->cur_buff], cdda->size >> 2);
+					aica_transfer(cdda->buff[PCM_DMA_BUFF], cdda->aica_left[cdda->cur_buff], cdda->size >> 2);
 #ifdef DEV_TYPE_SD
-					if(/*cdda->wav_format != WAVE_FMT_YAMAHA_ADPCM_ITU_G723 && */fill_pcm_buff() < 0) {
-						return;
-					}
+					fill_pcm_buff();
 #endif
 					cdda->stat = CDDA_STAT_SNDR;
 				} else {
-					
-//					aica_sq_transfer(cdda->buff[PCM_DMA_BUFF], cdda->cur_buff ? cdda->aica_right[0] : cdda->aica_left[0], cdda->size >> 1);
-					aica_dma_transfer(cdda->buff[PCM_DMA_BUFF], cdda->cur_buff ? cdda->aica_right[0] : cdda->aica_left[0], cdda->size >> 1);
+					aica_transfer(cdda->buff[PCM_DMA_BUFF], cdda->cur_buff ? cdda->aica_right[0] : cdda->aica_left[0], cdda->size >> 1);
 					cdda->cur_buff = cdda->cur_buff ? 0 : 1;
-					fill_pcm_buff();
+					cdda->stat = CDDA_STAT_FILL;
 				}
 			}
 		}
 	}
 	
 	/* If transfer of left channel is done, start for right channel */
-	else if(cdda->stat == CDDA_STAT_SNDR && !aica_dma_in_progress()) {
+	else if(cdda->stat == CDDA_STAT_SNDR && !aica_transfer_in_progress()) {
 
 		uint32 size = cdda->size >> 2;
-		
-//		aica_sq_transfer(cdda->buff[PCM_DMA_BUFF] + size, cdda->aica_right[cdda->cur_buff], size);
-		aica_dma_transfer(cdda->buff[PCM_DMA_BUFF] + size, cdda->aica_right[cdda->cur_buff], size);
+
+		aica_transfer(cdda->buff[PCM_DMA_BUFF] + size, cdda->aica_right[cdda->cur_buff], size);
 		cdda->cur_buff = cdda->cur_buff ? 0 : 1;
 		
 #ifdef DEV_TYPE_SD
-//		if(cdda->wav_format != WAVE_FMT_YAMAHA_ADPCM_ITU_G723) {
-			cdda->stat = CDDA_STAT_WAIT;
+		if(cdda->stat == CDDA_STAT_WAIT) {
 			poll(cdda->fd);
-//			return;
-//		}
-//#endif
+		} else {
+			cdda->stat = CDDA_STAT_FILL;
+		}
 #else
-//		cdda->stat = CDDA_STAT_FILL;
-		fill_pcm_buff();
+		cdda->stat = CDDA_STAT_FILL;
 #endif
 	}
 }

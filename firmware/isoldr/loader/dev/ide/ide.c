@@ -1,5 +1,6 @@
 /**
- * Copyright (c) 2017 Megavolt85, SWAT <http://www.dc-swat.ru>
+ * Copyright (c) 2014-2020 SWAT <http://www.dc-swat.ru>
+ * Copyright (c) 2017 Megavolt85
  *
  * This file is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -133,14 +134,13 @@
 #define IN16(addr)        *((volatile u16 *)addr)
 #define IN8(addr)         *((volatile u8  *)addr)
 
-typedef struct ide_req
-{
-	void	*buff;
-	u64		lba;
-	u32		count;
-	u32		bytes;
-	u8		cmd;
-	u8		async;
+typedef struct ide_req {
+	void *buff;
+	u64	lba;
+	u32	count;
+	u32	bytes;
+	u8 cmd;
+	u8 async;
 	struct ide_device *dev;
 } ide_req_t;
 
@@ -151,10 +151,15 @@ typedef struct ide_req
 #endif
 
 static struct ide_device ide_devices[MAX_DEVICE_COUNT];
-s32 g1_dma_irq_visible = 0;
-static s32 _g1_dma_irq_enabled = 0,
-			g1_dma_part_avail = 0,
-			g1_dma_irq_idx = 0;
+static s16 g1_dma_part_avail = 0,
+			g1_dma_irq_count = 0;
+static s8 g1_dma_irq_visible = 1,
+			g1_dma_irq_called = 0,
+			g1_dma_irq_idx_game = 0;
+
+#ifdef HAVE_EXPT
+static s8 g1_dma_irq_idx_internal = 0;
+#endif
 
 
 #define g1_ata_wait_status(n) \
@@ -170,20 +175,12 @@ static s32 _g1_dma_irq_enabled = 0,
 #define g1_ata_wait_dma() \
     do {} while(IN32(G1_ATA_DMA_STATUS))
 
-u8 swap8(u8 n)
-{
+u8 swap8(u8 n) {
 	return ((n >> 4) | (n << 4));
 }
 
-u16 swap16(u16 n)
-{
+u16 swap16(u16 n) {
 	return ((n >> 8) | (n << 8));
-}
-
-u32 swap32(u32 n)
-{
-	u8 *i = (u8 *)&n;
-	return (u32) ((i[0] << 24) | (i[1] << 16) | (i[2] << 8) | i[3]);
 }
 
 /* Is a G1 DMA in progress? */
@@ -196,48 +193,82 @@ u32 g1_dma_transfered(void) {
 }
 
 s32 g1_dma_irq_enabled() {
-	return _g1_dma_irq_enabled;
+	return g1_dma_irq_called; // || g1_dma_has_irq_mask();
 }
 
+#ifdef HAVE_EXPT
+
 void *g1_dma_handler(void *passer, register_stack *stack, void *current_vector) {
+
+	uint32 code = *REG_INTEVT;
+	uint32 status = ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
+	uint32 statusExt = ASIC_IRQ_STATUS[ASIC_MASK_EXT_INT];
+	uint32 statusErr = ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT];
+
+	if ((statusErr & ASIC_ERR_G1DMA_ILLEGAL) || (statusErr & ASIC_ERR_G1DMA_OVERRUN) || (statusErr & ASIC_ERR_G1DMA_ROM_FLASH)) {
+		LOGF("ASIC_ERR_G1DMA: 0x%08lx %d\n", statusErr, g1_dma_irq_visible);
+		ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT] = ASIC_ERR_G1DMA_ROM_FLASH | ASIC_ERR_G1DMA_ILLEGAL | ASIC_ERR_G1DMA_OVERRUN;
+	}
+
+	if (!g1_dma_irq_called) {
+		(void)passer;
+		(void)stack;
+		g1_dma_irq_called = 1;
+	}
+
+	uint32 g1_dma_irq_idx = (g1_dma_irq_visible ? g1_dma_irq_idx_game : g1_dma_irq_idx_internal);
+
+	if ((g1_dma_irq_idx == 13 && code != EXP_CODE_INT13) ||
+		(g1_dma_irq_idx == 11 && code != EXP_CODE_INT11) || 
+		(g1_dma_irq_idx == 9 && code != EXP_CODE_INT9)
+	) {
+		return current_vector;
+	}
 	
 #ifdef DEBUG
 	LOGFF("IRQ: %08lx NRM: 0x%08lx EXT: 0x%08lx ERR: 0x%08lx, VISIBLE: %d\n",
-	      *REG_INTEVT,
-		  ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT],
-	      ASIC_IRQ_STATUS[ASIC_MASK_EXT_INT],
-	      ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT],
-		  g1_dma_irq_visible);
+	      *REG_INTEVT, status, statusExt, statusErr, g1_dma_irq_visible);
 //	dump_regs(stack);
 #else
-	LOGFF("%08lx 0x%08lx\n", *REG_INTEVT, ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT]);
+	LOGFF("%08lx 0x%08lx %d 0x%08lx\n", *REG_INTEVT, status, g1_dma_irq_visible, (uint32)r15());
 #endif
 
-	if(!_g1_dma_irq_enabled) {
-		(void)passer;
-		(void)stack;
-		_g1_dma_irq_enabled = 1;
+	if (statusExt & ASIC_EXT_GD_CMD) {
+		DBGF("ASIC_EXT_GD_CMD: 0x%08lx %d\n", statusExt, g1_dma_irq_visible);
+
+		if (!(status & ASIC_NRM_GD_DMA)) {
+
+			/* Ack device IRQ. */
+			u8 state = IN8(G1_ATA_STATUS_REG);
+
+			if (state & ATA_SR_ERR) {
+				LOGF("G1_ATA_STATUS_REG: %x\n", state);
+			}
+		}
 	}
 
-	/* Processing filesystem */
-	poll_all();
+	if (status & ASIC_NRM_GD_DMA) {
 
-	if (g1_dma_irq_visible) {
-		return current_vector;
+		/* Processing filesystem */
+		poll_all();
+
+		if (g1_dma_irq_visible && ++g1_dma_irq_count < 5) {
+			return current_vector;
+		}
+
+		/* Ack DMA IRQ. */
+		ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT] = ASIC_NRM_GD_DMA;
 	}
-
-	/* Ack DMA IRQ. */
-	ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT] = ASIC_NRM_GD_DMA;
-	(void)ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
-	(void)ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
 
 	return my_exception_finish;
 }
 
 
 s32 g1_dma_init_irq() {
-	
-	g1_dma_irq_idx = 0;
+
+	g1_dma_irq_idx_game = 0;
+	g1_dma_irq_idx_internal = 0;
+	g1_dma_irq_called = 0;
 	g1_dma_irq_visible = 1;
 
 #ifdef NO_ASIC_LT
@@ -247,15 +278,16 @@ s32 g1_dma_init_irq() {
 	asic_lookup_table_entry a_entry;
 
 	a_entry.irq = EXP_CODE_ALL;
+	a_entry.clear_irq = 0;
 	a_entry.mask[ASIC_MASK_NRM_INT] = ASIC_NRM_GD_DMA;
-	a_entry.mask[ASIC_MASK_EXT_INT] = 0; //ASIC_EXT_GD_CMD;
-	a_entry.mask[ASIC_MASK_ERR_INT] = 0; /*ASIC_ERR_G1DMA_ILLEGAL |
-											ASIC_ERR_G1DMA_OVERRUN |
-											ASIC_ERR_G1DMA_ROM_FLASH;*/
+	a_entry.mask[ASIC_MASK_EXT_INT] = ASIC_EXT_GD_CMD;
+	a_entry.mask[ASIC_MASK_ERR_INT] = (ASIC_ERR_G1DMA_ILLEGAL | ASIC_ERR_G1DMA_OVERRUN | ASIC_ERR_G1DMA_ROM_FLASH);
 	a_entry.handler = g1_dma_handler;
 	return asic_add_handler(&a_entry, NULL, 0);
 #endif
 }
+
+#endif
 
 void g1_dma_abort(void) {
 	if (g1_dma_in_progress()) {
@@ -266,6 +298,9 @@ void g1_dma_abort(void) {
 }
 
 void g1_dma_start(u32 addr, size_t bytes) {
+
+	g1_dma_irq_count = 0;
+
 	/* Set the DMA parameters up. */
 	OUT32(G1_ATA_DMA_PRO, G1_ATA_DMA_PRO_SYSMEM);
 	OUT32(G1_ATA_DMA_ADDRESS, (addr & 0x0FFFFFFF));
@@ -277,80 +312,130 @@ void g1_dma_start(u32 addr, size_t bytes) {
 	OUT8(G1_ATA_DMA_STATUS, 1);
 }
 
-static void g1_dma_hide_irq(int all) {
-	if (*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) {
+void g1_dma_irq_hide(s32 all) {
 
-		g1_dma_irq_idx = 11;
+	g1_dma_irq_visible = 0;
+
+	if (*ASIC_IRQ9_MASK & ASIC_NRM_GD_DMA) {
+
+		g1_dma_irq_idx_game = 9;
+		*ASIC_IRQ9_MASK &= ~ASIC_NRM_GD_DMA;
+
+	} else if (*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) {
+
+		g1_dma_irq_idx_game = 11;
 		*ASIC_IRQ11_MASK &= ~ASIC_NRM_GD_DMA;
 
 	} else if (*ASIC_IRQ13_MASK & ASIC_NRM_GD_DMA) {
 
-		g1_dma_irq_idx = 13;
+		g1_dma_irq_idx_game = 13;
 		*ASIC_IRQ13_MASK &= ~ASIC_NRM_GD_DMA;
 
-	}/* else {
-		g1_dma_irq_idx = 0;
-	}*/
+	} else {
+		g1_dma_irq_idx_game = 0;
+	}
 
-	if (all) {
-		*ASIC_IRQ9_MASK &= ~ASIC_NRM_GD_DMA;
-	}
 #ifdef HAVE_EXPT
-	else {
-		*ASIC_IRQ9_MASK |= ASIC_NRM_GD_DMA;
+	if (!all && exception_inited()) {
+		if (g1_dma_irq_idx_game == 9) {
+			*ASIC_IRQ11_MASK |= ASIC_NRM_GD_DMA;
+			g1_dma_irq_idx_internal = 11;
+		} else {
+			*ASIC_IRQ9_MASK |= ASIC_NRM_GD_DMA;
+			g1_dma_irq_idx_internal = 9;
+		}
+	} else {
+		g1_dma_irq_idx_internal = 0;
 	}
+#else
+	(void)all;
 #endif
 }
 
-void g1_dma_set_irq_mask(s32 enable) {
+void g1_dma_irq_restore(void) {
 
-	s32 dma = fs_dma_enabled();
+#ifdef HAVE_EXPT
+	if (g1_dma_irq_idx_internal == 9) {
+		*ASIC_IRQ9_MASK &= ~ASIC_NRM_GD_DMA;
+	} else if(g1_dma_irq_idx_internal == 11) {
+		*ASIC_IRQ11_MASK &= ~ASIC_NRM_GD_DMA;
+	}
+	// g1_dma_irq_idx_internal = 0;
+#endif
 
-	if (dma == FS_DMA_DISABLED) {
+	if(g1_dma_irq_idx_game == 9) {
+		*ASIC_IRQ9_MASK |= ASIC_NRM_GD_DMA;
+	} else if(g1_dma_irq_idx_game == 11) {
+		*ASIC_IRQ11_MASK |= ASIC_NRM_GD_DMA;
+	} else if(g1_dma_irq_idx_game == 13) {
+		*ASIC_IRQ13_MASK |= ASIC_NRM_GD_DMA;
+	}
+
+	// g1_dma_irq_idx_game = 0;
+	g1_dma_irq_visible = 1;
+}
+
+
+void g1_dma_set_irq_mask(s32 last_transfer) {
+
+	s32 dma_mode = fs_dma_enabled();
+
+	if (dma_mode == FS_DMA_DISABLED) {
 
 		return;
 
-	} else if(dma == FS_DMA_HIDDEN) {
+	} else if (dma_mode == FS_DMA_HIDDEN) {
 
 		/* Hide all internal DMA transfers (CDDA, etc...) */
-		enable = 0;
 		if (g1_dma_irq_visible) {
-			g1_dma_hide_irq(0);
+			g1_dma_irq_hide(0);
+		} else {
+			return;
 		}
 
-	} else if(dma == FS_DMA_NO_IRQ) {
+	} else if (dma_mode == FS_DMA_NO_IRQ) {
 
-		enable = 0;
-		if (g1_dma_irq_visible) {
-			g1_dma_hide_irq(1);
+		if (g1_dma_has_irq_mask()) {
+			g1_dma_irq_hide(1);
+		} else {
+			return;
 		}
 
-	} else if(!enable && ((*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) || (*ASIC_IRQ13_MASK & ASIC_NRM_GD_DMA))) {
+	} else if (dma_mode == FS_DMA_SHARED) {
 
-		g1_dma_hide_irq(0);
-		
-	} else if(enable && !((*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) || (*ASIC_IRQ13_MASK & ASIC_NRM_GD_DMA))) {
-
-		if(g1_dma_irq_idx == 11) {
-			*ASIC_IRQ11_MASK |= ASIC_NRM_GD_DMA;
-		} else if(g1_dma_irq_idx == 13) {
-			*ASIC_IRQ13_MASK |= ASIC_NRM_GD_DMA;
+		if (last_transfer && !g1_dma_irq_visible) {
+			g1_dma_irq_restore();
+		} else if (!last_transfer && g1_dma_irq_visible) {
+			g1_dma_irq_hide(0);
+		} else {
+			if(!g1_dma_irq_idx_game) {
+				g1_dma_irq_idx_game = g1_dma_has_irq_mask();
+			}
+			return;
 		}
-
-		*ASIC_IRQ9_MASK &= ~ASIC_NRM_GD_DMA;
 	}
 
 #ifdef LOG
-	if(g1_dma_irq_visible != enable) {
-		LOGFF("%d %d %d (%d %d %d)\n",
-			(*ASIC_IRQ9_MASK & ASIC_NRM_GD_DMA) ? 1 : 0, 
-			(*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) ? 1 : 0, 
-			(*ASIC_IRQ13_MASK & ASIC_NRM_GD_DMA) ? 1 : 0,
-			enable, fs_dma_enabled(), g1_dma_irq_idx
-		);
-	}
+	LOGFF("%d %d %d (mode=%d last=%d game=%d int=%d)\n",
+		(*ASIC_IRQ9_MASK & ASIC_NRM_GD_DMA) ? 9 : 0, 
+		(*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) ? 11 : 0, 
+		(*ASIC_IRQ13_MASK & ASIC_NRM_GD_DMA) ? 13 : 0,
+		dma_mode, last_transfer,
+		g1_dma_irq_idx_game,
+# ifdef HAVE_EXPT
+		g1_dma_irq_idx_internal
+# else
+		0
+# endif
+	);
 #endif
-	g1_dma_irq_visible = enable;
+}
+
+s32 g1_dma_has_irq_mask() {
+	if (*ASIC_IRQ9_MASK & ASIC_NRM_GD_DMA) return 9; 
+	if (*ASIC_IRQ11_MASK & ASIC_NRM_GD_DMA) return 11; 
+	if (*ASIC_IRQ13_MASK & ASIC_NRM_GD_DMA) return 13;
+	return 0;
 }
 
 /* This one is an inline function since it needs to return something... */
@@ -971,18 +1056,15 @@ s32 g1_ata_pre_read_lba(u64 sector, size_t count) {
 s32 g1_ata_poll(void) {
 
 #ifdef HAVE_EXPT
-	if(exception_inside_int()) {
-		goto poll_end;
-	}
-#endif
-
+	if(!exception_inside_int() && g1_dma_in_progress()) {
+#else
 	if(g1_dma_in_progress()) {
+#endif
 		int rv = g1_dma_transfered();
 		DBGFF("%d\n", rv);
 		return rv > 0 ? rv : 32;
 	}
 
-poll_end:
 	if (g1_dma_part_avail) {
 		return 0;
 	}

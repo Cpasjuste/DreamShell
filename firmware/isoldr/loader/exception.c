@@ -1,7 +1,8 @@
 /**
  * DreamShell ISO Loader
  * Exception handling
- * (c)2014-2016 SWAT <http://www.dc-swat.ru>
+ * (c)2014-2020 SWAT <http://www.dc-swat.ru>
+ * Based on Netplay VOOT code by Scott Robinson <scott_vo@quadhome.com>
  */
 
 #include <main.h>
@@ -9,6 +10,7 @@
 #include <arch/cache.h>
 
 extern uint32 exception_os_type;
+extern uint32 interrupt_stack;
 static exception_table exp_table;
 static volatile int inside_int = 0;
 static int inited = 0;
@@ -24,7 +26,9 @@ int exception_inited(void) {
 static int exception_vbr_ok(void) {
 	
 	uint32 int_changed;
-//	uint32 gen_changed;
+#ifdef USE_GDB
+	uint32 gen_changed;
+#endif
 //	uint32 cache_changed;
 
     /* Check to see if our VBR hooks are still installed. */
@@ -33,12 +37,13 @@ static int exception_vbr_ok(void) {
 		interrupt_sub_handler,
 		interrupt_sub_handler_end - interrupt_sub_handler
 	);
-
-//	gen_changed = memcmp(
-//		VBR_GEN (vbr_buffer) - (general_sub_handler_base - general_sub_handler),
-//		general_sub_handler,
-//		general_sub_handler_end - general_sub_handler
-//	);
+#ifdef USE_GDB
+	gen_changed = memcmp(
+		VBR_GEN (vbr_buffer) - (general_sub_handler_base - general_sub_handler),
+		general_sub_handler,
+		general_sub_handler_end - general_sub_handler
+	);
+#endif
 //
 //	cache_changed = memcmp(
 //		VBR_GEN (vbr_buffer) - (cache_sub_handler_base - cache_sub_handler),
@@ -47,7 +52,13 @@ static int exception_vbr_ok(void) {
 //	);
 
     /* After enough exceptions, allow the initialization. */
-    return !(int_changed/* || gen_changed || cache_changed*/);
+    return !(
+		int_changed
+#ifdef USE_GDB
+		|| gen_changed
+#endif
+		/* || cache_changed*/
+	);
 }
 
 int exception_init(uint32 vbr_addr) {
@@ -62,9 +73,26 @@ int exception_init(uint32 vbr_addr) {
 		LOGFF("already initialized\n");
 		return 0;
 	}
-	
+
 	exception_os_type = IsoInfo->exec.type;
-	LOGFF("VBR buffer at 0x%08lx\n", vbr_buffer);
+
+	/* Relocate the VBR index - bypass our entry logic. */
+	if (exception_os_type == BIN_TYPE_KATANA) {
+		// Skip one more instruction because it in paired using with old replaced instruction.
+		vbr_buffer_orig = vbr_buffer + (sizeof (uint16) * 4);
+	} else if(exception_os_type == BIN_TYPE_KOS) {
+		// Direct usage of _irq_save_regs by fixed offset.
+		vbr_buffer_orig = vbr_buffer - 0x188;
+	} else {
+		// Normally skip only 3 replaced instruction.
+		vbr_buffer_orig = vbr_buffer + (sizeof (uint16) * 3);
+	}
+
+	// if(IsoInfo->exec.type != BIN_TYPE_WINCE) {
+	// 	interrupt_stack = (uint32)sector_buffer + sector_buffer_size + 4096;
+	// }
+	// LOGFF("VBR buffer 0x%08lx -> 0x%08lx, stack 0x%08lx\n", vbr_buffer, vbr_buffer_orig, interrupt_stack);
+	LOGFF("VBR buffer 0x%08lx -> 0x%08lx\n", vbr_buffer, vbr_buffer_orig);
 
 	/* Interrupt hack for VBR. */
 	memcpy(
@@ -73,12 +101,19 @@ int exception_init(uint32 vbr_addr) {
 		interrupt_sub_handler_end - interrupt_sub_handler
 	);
 
+	if (exception_os_type != BIN_TYPE_WINCE) {
+		uint16 *change_stack_instr = VBR_INT(vbr_buffer) - (interrupt_sub_handler_base - interrupt_sub_handler);
+		*change_stack_instr = 0x0009; // nop
+	}
+
+#ifdef USE_GDB
 	/* General exception hack for VBR. */
-//	memcpy(
-//		VBR_GEN(vbr_buffer) - (general_sub_handler_base - general_sub_handler),
-//		general_sub_handler,
-//		general_sub_handler_end - general_sub_handler
-//	);
+	memcpy(
+		VBR_GEN(vbr_buffer) - (general_sub_handler_base - general_sub_handler),
+		general_sub_handler,
+		general_sub_handler_end - general_sub_handler
+	);
+#endif
 
 	/* Cache exception hack for VBR. */
 //	memcpy(
@@ -90,19 +125,6 @@ int exception_init(uint32 vbr_addr) {
 	/* Flush cache after modifying application memory. */
 	dcache_flush_range((uint32)vbr_buffer, 0xC08);
 	icache_flush_range((uint32)vbr_buffer, 0xC08);
-	
-	/* Relocate the VBR index - bypass our entry logic. */
-	if(IsoInfo->exec.type == BIN_TYPE_WINCE) {
-		vbr_buffer_orig = vbr_buffer + (sizeof (uint16) * 3);
-	} else {
-		
-		vbr_buffer_orig = vbr_buffer + (sizeof (uint16) * 4);
-		uint16 *change_stack = VBR_INT(vbr_buffer) - (interrupt_sub_handler_base - interrupt_sub_handler);
-		*change_stack = 0x0009; // nop
-		
-//		change_stack = VBR_GEN(vbr_buffer) - (general_sub_handler_base - general_sub_handler);
-//		*change_stack = 0x0009; // nop
-	}
 
 	inited = 1;
 	return 0;
@@ -153,14 +175,14 @@ void *exception_handler(register_stack *stack) {
 	uint32 index;
 	void *back_vector;
 	
-	if(inside_int) {
+	if (inside_int) {
 		LOGFF("ERROR: already in IRQ\n");
 		return my_exception_finish;
 	}
 	
 	inside_int = 1;
 	
-#if 0//defined(LOG)// && defined(DEBUG)
+#if 0
 	LOGFF("0x%02x 0x%08lx\n",
 			stack->exception_type & 0xff, 
 			stack->exception_type == EXP_TYPE_INT ? *REG_INTEVT : *REG_EXPEVT);
@@ -168,32 +190,34 @@ void *exception_handler(register_stack *stack) {
 #endif
 
 	/* Ensure vbr buffer is set... */
-	vbr_buffer = (uint8 *) stack->vbr;
+	// vbr_buffer = (uint8 *) stack->vbr;
 
 	/* Increase our counters and set the proper back_vectors. */
 	switch (stack->exception_type)
 	{
-//		case EXP_TYPE_GEN :
-//		{
-//			//exp_table.general_exception_count++;
-//			exception_code = *REG_EXPEVT;
-//
-//			/* Never pass on UBC interrupts to the game. */
-//			if ((exception_code == EXP_CODE_UBC) || (exception_code == EXP_CODE_TRAP)) {
-//				//exp_table.ubc_exception_count++;
-//				back_vector = my_exception_finish;
-//			} else {
-//				back_vector = VBR_GEN(vbr_buffer_orig);
-//			}
-//
-//			break; 
-//		}
+#ifdef USE_GDB
+		case EXP_TYPE_GEN :
+		{
+			//exp_table.general_exception_count++;
+			exception_code = *REG_EXPEVT;
+
+			/* Never pass on UBC interrupts to the game. */
+			if ((exception_code == EXP_CODE_UBC) || (exception_code == EXP_CODE_TRAP)) {
+				//exp_table.ubc_exception_count++;
+				back_vector = my_exception_finish;
+			} else {
+				back_vector = exception_os_type == BIN_TYPE_KOS ? vbr_buffer_orig : VBR_GEN(vbr_buffer_orig);
+			}
+
+			break; 
+		}
+#endif
 //
 //		case EXP_TYPE_CACHE :
 //		{
 //			//exp_table.cache_exception_count++;
 //			exception_code  = *REG_EXPEVT;
-//			back_vector     = VBR_CACHE(vbr_buffer_orig);
+//			back_vector     = exception_os_type == BIN_TYPE_KOS ? vbr_buffer_orig : VBR_CACHE(vbr_buffer_orig);
 //			break;
 //		}
 
@@ -201,7 +225,7 @@ void *exception_handler(register_stack *stack) {
 		{
 			//exp_table.interrupt_exception_count++;
 			exception_code  = *REG_INTEVT;
-			back_vector     = VBR_INT(vbr_buffer_orig);
+			back_vector     = exception_os_type == BIN_TYPE_KOS ? vbr_buffer_orig : VBR_INT(vbr_buffer_orig);
 			break;
 		}
 

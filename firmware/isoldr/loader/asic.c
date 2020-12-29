@@ -1,7 +1,8 @@
 /**
  * DreamShell ISO Loader
  * ASIC IRQ handling
- * (c)2014-2017 SWAT <http://www.dc-swat.ru>
+ * (c)2014-2020 SWAT <http://www.dc-swat.ru>
+ * Based on Netplay VOOT code by Scott Robinson <scott_vo@quadhome.com>
  */
 
 #include <main.h>
@@ -9,67 +10,55 @@
 #include <asic.h>
 #include <cdda.h>
 
-#ifdef NO_ASIC_LT
+#if (defined(DEV_TYPE_IDE) || defined(DEV_TYPE_GD)) && defined(NO_ASIC_LT)
 void* g1_dma_handler(void *passer, register_stack *stack, void *current_vector);
 #endif
 
 static asic_lookup_table   asic_table;
 static exception_handler_f old_handler;
-extern int g1_dma_irq_visible;
 //void dump_maple_dma_buffer();
 
 static void* asic_handle_exception(register_stack *stack, void *current_vector) {
 	
-//	uint32 status = ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
 	uint32 code = *REG_INTEVT;
+	// uint32 status = ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
 	
-//	if(code == EXP_CODE_INT11/* || code == EXP_CODE_INT9*/)
-//		LOGFF("IRQ: 0x%lx NRM: 0x%08lx EXT: 0x%08lx ERR: 0x%08lx\n", 
-//					*REG_INTEVT & 0x0fff, status, 
-//					ASIC_IRQ_STATUS[ASIC_MASK_EXT_INT], 
-//					ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT]);
-//
-//	dump_regs(stack);
+	// if(code == EXP_CODE_INT13 || code == EXP_CODE_INT11 || code == EXP_CODE_INT9) {
+	// 	LOGF("IRQ: 0x%lx NRM: 0x%08lx EXT: 0x%08lx ERR: 0x%08lx\n", 
+	// 				*REG_INTEVT & 0x0fff, status, 
+	// 				ASIC_IRQ_STATUS[ASIC_MASK_EXT_INT], 
+	// 				ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT]);
+	// }
+	// dump_regs(stack);
 
 #ifdef NO_ASIC_LT
 	/**
 	 * Use ASIC handlers directly instead of lookup table
 	 */
+
+	void *back_vector = current_vector;
 	uint32 status = ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
-	
-//#ifdef LOG
+
+# if defined(DEV_TYPE_IDE) || defined(DEV_TYPE_GD)
 	uint32 statusExt = ASIC_IRQ_STATUS[ASIC_MASK_EXT_INT];
 	uint32 statusErr = ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT];
 
-	if(statusExt & ASIC_EXT_GD_CMD) {
-		LOGF("IDE CMD INT: 0x%08lx\n", statusExt);
-//		if (!g1_dma_irq_visible) {
-//			uint8 st = *((volatile uint8 *) 0xA05F709C);
-//			(void) st;
-//			return my_exception_finish;
-//		}
-	}
-
-	if((statusErr & ASIC_ERR_G1DMA_ILLEGAL) || (statusErr & ASIC_ERR_G1DMA_OVERRUN) || (statusErr & ASIC_ERR_G1DMA_ROM_FLASH)) {
-		LOGF("G1DMA ERR: 0x%08lx\n", statusErr);
-		ASIC_IRQ_STATUS[ASIC_MASK_ERR_INT] = ASIC_ERR_G1DMA_ROM_FLASH | ASIC_ERR_G1DMA_ILLEGAL | ASIC_ERR_G1DMA_OVERRUN;
-	}
-//#endif
-
-	void *back_vector = current_vector;
-	
-	if(status & ASIC_NRM_GD_DMA) {
+	if ((status & ASIC_NRM_GD_DMA) ||
+		(statusExt & ASIC_EXT_GD_CMD) ||
+		(statusErr & ASIC_ERR_G1DMA_ILLEGAL) || (statusErr & ASIC_ERR_G1DMA_OVERRUN) || (statusErr & ASIC_ERR_G1DMA_ROM_FLASH)
+	) {
 		back_vector = g1_dma_handler(NULL, stack, current_vector);
 	}
-	
-	if(code == EXP_CODE_INT13 || code == EXP_CODE_INT11 || code == EXP_CODE_INT9) {
+# else
+	(void)stack;
+# endif
 
-		if(status & ASIC_NRM_VSYNC) {
-#ifdef HAVE_CDDA
-			if(IsoInfo->emu_cdda) {
-				CDDA_MainLoop();
-			}
-#endif
+	if (code == EXP_CODE_INT13 || code == EXP_CODE_INT11 || code == EXP_CODE_INT9) {
+
+		if (status & ASIC_NRM_VSYNC) {
+# ifdef HAVE_CDDA
+			CDDA_MainLoop();
+# endif
 			apply_patch_list();
 		}
 
@@ -95,25 +84,23 @@ static void* asic_handle_exception(register_stack *stack, void *current_vector) 
 			where the SH4 combines them and/or the exceptions have been
 			placed in a queue. However, this doesn't bother me too much.
 		*/
-		for(int i = 0; i < 3; i++) {
+		for (int i = 0; i < 3; i++) {
 			passer.mask[i] = ASIC_IRQ_STATUS[i] & asic_table.table[index].mask[i];
 		}
 		
 		passer.irq = code;
-		passer.clear_irq = 1;
+		passer.clear_irq = asic_table.table[index].clear_irq;
 
 		if ((passer.mask[ASIC_MASK_NRM_INT] || passer.mask[ASIC_MASK_EXT_INT] || passer.mask[ASIC_MASK_ERR_INT]) && 
 			(asic_table.table[index].irq == passer.irq || asic_table.table[index].irq == EXP_CODE_ALL)) {
 			
-			new_vector = asic_table.table[index].handler (&passer, stack, new_vector);
+			new_vector = asic_table.table[index].handler(&passer, stack, new_vector);
 
 			/* Clear the IRQ by default - but the option is controllable. */
 			if (passer.clear_irq) {
 				
 				if(passer.mask[ASIC_MASK_NRM_INT]) {
 					ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT] = passer.mask[ASIC_MASK_NRM_INT];
-					(void)ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
-					(void)ASIC_IRQ_STATUS[ASIC_MASK_NRM_INT];
 				}
 				
 				if(passer.mask[ASIC_MASK_ERR_INT]) {
@@ -125,7 +112,7 @@ static void* asic_handle_exception(register_stack *stack, void *current_vector) 
 
 	/* Return properly, depending if there is an older handler. */
 	if (old_handler)
-		return old_handler (stack, new_vector);
+		return old_handler(stack, new_vector);
 	else
 		return new_vector;
 #endif

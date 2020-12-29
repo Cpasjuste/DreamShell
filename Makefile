@@ -1,6 +1,6 @@
 #
 # DreamShell Makefile
-# Copyright (C) 2004-2019 SWAT
+# Copyright (C) 2004-2020 SWAT
 # http://www.dc-swat.ru
 #
 # This makefile can build CDI image (type "make cdi"),
@@ -13,7 +13,7 @@
 TARGET = DS
 TARGET_BIN = $(TARGET)_CORE.BIN
 TARGET_BIN_CD = 1$(TARGET_BIN)
-TRAGET_VERSION = -DVER_MAJOR=4 -DVER_MINOR=0 -DVER_MICRO=0 -DVER_BUILD=0x24 #RC 4
+TRAGET_VERSION = -DVER_MAJOR=4 -DVER_MINOR=0 -DVER_MICRO=0 -DVER_BUILD=0x25 #RC 5
 
 all: rm-elf $(TARGET)
 
@@ -164,16 +164,16 @@ nulldcl: $(TARGET).cdi
 	@run ./emu/nullDC.exe -serial "debug.log" > emu.log
 	
 run: $(TARGET).elf
-	$(DS_SDK)/bin/dc-tool -c $(DS_BUILD) -t $(DC_LAN_IP) -x $(TARGET).elf
+	$(DS_SDK)/bin/dc-tool-ip -c $(DS_BUILD) -t $(DC_LAN_IP) -x $(TARGET).elf
 
 run-serial: $(TARGET).elf
-	$(DS_SDK)/bin/dc-tool -c $(DS_BUILD) -t $(DC_SERIAL_PORT) -b $(DC_SERIAL_BAUD) -x $(TARGET).elf
+	$(DS_SDK)/bin/dc-tool-ser -c $(DS_BUILD) -t $(DC_SERIAL_PORT) -b $(DC_SERIAL_BAUD) -x $(TARGET).elf
 	
 debug: $(TARGET).elf
-	$(DS_SDK)/bin/dc-tool -g -c $(DS_BUILD) -t $(DC_LAN_IP) -x $(TARGET).elf
+	$(DS_SDK)/bin/dc-tool-ip -g -c $(DS_BUILD) -t $(DC_LAN_IP) -x $(TARGET).elf
 
 debug-serial: $(TARGET).elf
-	$(DS_SDK)/bin/dc-tool -g -c $(DS_BUILD) -t $(DC_SERIAL_PORT) -b $(DC_SERIAL_BAUD) -x $(TARGET).elf
+	$(DS_SDK)/bin/dc-tool-ser -g -c $(DS_BUILD) -t $(DC_SERIAL_PORT) -b $(DC_SERIAL_BAUD) -x $(TARGET).elf
 
 gdb: $(TARGET)-DBG.elf
 	$(KOS_CC_BASE)/bin/$(KOS_CC_PREFIX)-gdb $(TARGET)-DBG.elf --eval-command "target remote localhost:2159"
@@ -181,10 +181,10 @@ gdb: $(TARGET)-DBG.elf
 lxdream: $(TARGET).cdi
 	lxdream -p $(TARGET).cdi
 	
-lxelf: $(TARGET).elf
+lxdelf: $(TARGET).elf
 	lxdream -u -p -e $(TARGET).elf
 
-lxgdb:
+lxdgdb:
 	lxdream -g 2000 -n $(TARGET).cdi &
 	sleep 2
 	$(KOS_CC_BASE)/bin/$(KOS_CC_PREFIX)-gdb $(TARGET)-DBG.elf --eval-command "target remote localhost:2000"
@@ -199,7 +199,7 @@ $(TARGET).cdi: $(TARGET_BIN_CD) $(DS_BUILD)/lua/startup.lua
 	@-rm -f $(DS_BUILD)/$(TARGET_BIN)
 	@-rm -f $(DS_BUILD)/$(TARGET_BIN_CD)
 	@cp $(TARGET_BIN_CD) $(DS_BUILD)/$(TARGET_BIN_CD)
-	@genisoimage -V DreamShell -G $(RES_DIR)/IP.BIN -joliet -rock -l -x .svn -o $(TARGET).iso $(DS_BUILD)
+	@$(DS_SDK)/bin/mkisofs -V DreamShell -G $(RES_DIR)/IP.BIN -joliet -rock -l -x .svn -o $(TARGET).iso $(DS_BUILD)
 	@echo Convert ISO to CDI...
 	@-rm -f $(TARGET).cdi
 	@$(DS_SDK)/bin/cdi4dc $(TARGET).iso $(TARGET).cdi -d > conv_log.txt

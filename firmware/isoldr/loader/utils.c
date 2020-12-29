@@ -148,36 +148,36 @@ void apply_patch_list() {
 
 /* copies n bytes from src to dest, dest must be 32-byte aligned */
 void *sq_cpy(void *dest, const void *src, int n) {
-    unsigned int *d = (unsigned int *)(void *)
-                      (0xe0000000 | (((unsigned long)dest) & 0x03ffffe0));
-    const unsigned int *s = src;
+	unsigned int *d = (unsigned int *)(void *)
+					  (0xe0000000 | (((unsigned long)dest) & 0x03ffffe0));
+	const unsigned int *s = src;
 
-    /* Set store queue memory area as desired */
-    QACR0 = ((((unsigned int)dest) >> 26) << 2) & 0x1c;
-    QACR1 = ((((unsigned int)dest) >> 26) << 2) & 0x1c;
+	/* Set store queue memory area as desired */
+	QACR0 = ((((unsigned int)dest) >> 26) << 2) & 0x1c;
+	QACR1 = ((((unsigned int)dest) >> 26) << 2) & 0x1c;
 
-    /* fill/write queues as many times necessary */
-    n >>= 5;
+	/* fill/write queues as many times necessary */
+	n >>= 5;
 
-    while(n--) {
-        __asm__("pref @%0" : : "r"(s + 8));  /* prefetch 32 bytes for next loop */
-        d[0] = *(s++);
-        d[1] = *(s++);
-        d[2] = *(s++);
-        d[3] = *(s++);
-        d[4] = *(s++);
-        d[5] = *(s++);
-        d[6] = *(s++);
-        d[7] = *(s++);
-        __asm__("pref @%0" : : "r"(d));
-        d += 8;
-    }
+	while(n--) {
+		__asm__("pref @%0" : : "r"(s + 8));  /* prefetch 32 bytes for next loop */
+		d[0] = *(s++);
+		d[1] = *(s++);
+		d[2] = *(s++);
+		d[3] = *(s++);
+		d[4] = *(s++);
+		d[5] = *(s++);
+		d[6] = *(s++);
+		d[7] = *(s++);
+		__asm__("pref @%0" : : "r"(d));
+		d += 8;
+	}
 
-    /* Wait for both store queues to complete */
-    d = (unsigned int *)0xe0000000;
-    d[0] = d[8] = 0;
+	/* Wait for both store queues to complete */
+	d = (unsigned int *)0xe0000000;
+	d[0] = d[8] = 0;
 
-    return dest;
+	return dest;
 }
 
 
@@ -218,13 +218,13 @@ int printf(const char *fmt, ...) {
 }
 
 void vid_waitvbl() {
-    vuint32 *vbl = ((vuint32 *)0xa05f8000) + 0x010c / 4;
+	vuint32 *vbl = ((vuint32 *)0xa05f8000) + 0x010c / 4;
 
-    while(!(*vbl & 0x01ff))
-        ;
+	while(!(*vbl & 0x01ff))
+		;
 
-    while(*vbl & 0x01ff)
-        ;
+	while(*vbl & 0x01ff)
+		;
 }
 
 void draw_gdtex(uint8 *src) {
@@ -303,6 +303,8 @@ void video_screen_shot() {
 static int log_fd;
 #endif /* _FS_READONLY */
 
+static char log_buff[128];
+
 size_t strnlen(const char *s, size_t maxlen) {
 	const char *e;
 	size_t n;
@@ -340,6 +342,8 @@ int hex_to_int(char c) {
 
 int OpenLog() {
 
+	memset(log_buff, 0, sizeof(log_buff));
+
 #if _FS_READONLY == 0 && !defined(DEV_TYPE_GD)
 	log_fd = open("/isoldr.log", O_WRONLY);
 	
@@ -365,7 +369,7 @@ static int PutLog(char *buff) {
 		}
 #	else
 
-#	if defined(DEV_TYPE_DCL) || defined(DEV_TYPE_SD) || (defined(LOG_DCL) && defined(DEV_TYPE_IDE))
+#	if defined(DEV_TYPE_DCL) || defined(LOG_DCL)
 		dcload_write_buffer((uint8 *)buff, len);
 #	else
 		scif_write_buffer((uint8 *)buff, len, 1);
@@ -377,15 +381,14 @@ static int PutLog(char *buff) {
 }
 
 int WriteLog(const char *fmt, ...) {
-	char buff[128];
 	va_list args;
 	int i;
 
 	va_start(args, fmt);
-	i = vsnprintf(buff, sizeof(buff), fmt, args);
+	i = vsnprintf(log_buff, sizeof(log_buff), fmt, args);
 	va_end(args);
 
-	PutLog(buff);
+	PutLog(log_buff);
 	return i;
 }
 
@@ -400,15 +403,14 @@ int WriteLogFunc(const char *func, const char *fmt, ...) {
 	
 	PutLog(": ");
 	
-	char buff[128];
 	va_list args;
 	int i;
 
 	va_start(args, fmt);
-	i = vsnprintf(buff, sizeof(buff), fmt, args);
+	i = vsnprintf(log_buff, sizeof(log_buff), fmt, args);
 	va_end(args);
 
-	PutLog(buff);
+	PutLog(log_buff);
 	return i;
 }
 
@@ -422,27 +424,26 @@ void CloseLog() {
 #endif /* LOG */
 
 
-
 #if 0 // TODO
 static void maple_raddr(uint8 addr, int * port, int * unit) {
-    *port = (addr >> 6) & 3;
+	*port = (addr >> 6) & 3;
 
-    if(addr & 0x20)
-        *unit = 0;
-    else if(addr & 0x10)
-        *unit = 5;
-    else if(addr & 0x08)
-        *unit = 4;
-    else if(addr & 0x04)
-        *unit = 3;
-    else if(addr & 0x02)
-        *unit = 2;
-    else if(addr & 0x01)
-        *unit = 1;
-    else {
-        *port = -1;
-        *unit = -1;
-    }
+	if(addr & 0x20)
+		*unit = 0;
+	else if(addr & 0x10)
+		*unit = 5;
+	else if(addr & 0x08)
+		*unit = 4;
+	else if(addr & 0x04)
+		*unit = 3;
+	else if(addr & 0x02)
+		*unit = 2;
+	else if(addr & 0x01)
+		*unit = 1;
+	else {
+		*port = -1;
+		*unit = -1;
+	}
 }
 
 static uint32 maple_dma_count;
@@ -488,8 +489,64 @@ void dump_maple_dma_buffer() {
 #endif
 
 
-#if 0 // TODO: use malloc instead of sector_buffer
+// TODO: use malloc instead of sector_buffer too
+#ifdef HAVE_CDDA
 
+// FIXME: Can be different
+#define KATANA_MALLOC_INDEX  0x84
+#define KATANA_FREE_INDEX    0x152
+#define KATANA_REALLOC_INDEX 0x20a
+
+static uint8 *malloc_root;
+static const uint8 katana_malloc_key[] = {0xe6, 0x2f, 0xc6, 0x2f, 0xfc, 0x7f, 0x02, 0x00};
+
+int malloc_init(void) {
+	if (!malloc_root || memcmp(malloc_root, katana_malloc_key, sizeof(katana_malloc_key))) {
+		malloc_root = search_memory(katana_malloc_key, sizeof(katana_malloc_key));
+	}
+
+	return malloc_root ? 1 : 0;
+}
+
+void malloc_stat(uint32 *free_size, uint32 *max_free_size) {
+	if (malloc_root) {
+		return (*(void(*)())malloc_root)(free_size, max_free_size);
+	} else {
+		*free_size = 0;
+		*max_free_size = 0;
+	}
+}
+
+void *malloc(uint32 size) {
+	void *mem;
+
+	if (malloc_root) {
+		mem = (*(void*(*)())(malloc_root + KATANA_MALLOC_INDEX))(size);
+		return mem;
+	} else {
+		return NULL;
+	}
+}
+
+void free(void *data) {
+	if (malloc_root) {
+		return (*(void(*)()) (malloc_root + KATANA_FREE_INDEX))(data);
+	}
+}
+
+void *realloc(void *data, uint32 size) {
+	void *mem;
+
+	if (data && malloc_root) {
+		mem = (*(void*(*)())(malloc_root + KATANA_REALLOC_INDEX))(data, size);
+		return mem;
+	} else {
+		return NULL;
+	}
+}
+#endif
+
+#if 0
 typedef struct {
 	int is_available;
 	int size;

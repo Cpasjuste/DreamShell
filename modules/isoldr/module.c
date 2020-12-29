@@ -1,7 +1,7 @@
 /* DreamShell ##version##
 
    DreamShell ISO Loader module
-   Copyright (C)2009-2016 SWAT
+   Copyright (C)2009-2020 SWAT
 
 */
 
@@ -24,7 +24,7 @@ static void get_ipbin_info(isoldr_info_t *info, file_t fd, uint8 *sec, char *pse
 
 	uint32 len;
 
-	if(fs_ioctl(fd, sec, ISOFS_IOCTL_GET_BOOT_SECTOR_DATA) < 0) {
+	if(fs_ioctl(fd, ISOFS_IOCTL_GET_BOOT_SECTOR_DATA, sec) < 0) {
 
 		ds_printf("DS_ERROR: Can't get boot sector data\n");
 
@@ -182,20 +182,20 @@ static int get_image_info(isoldr_info_t *info, const char *iso_file, int use_gdt
 	}
 
 	/* TODO check errors */
-	fs_ioctl(fd, &info->exec.lba, ISOFS_IOCTL_GET_FD_LBA);
-	fs_ioctl(fd, &info->image_type, ISOFS_IOCTL_GET_IMAGE_TYPE);
-	fs_ioctl(fd, &info->track_lba[0], ISOFS_IOCTL_GET_DATA_TRACK_LBA);
-	fs_ioctl(fd, &info->sector_size, ISOFS_IOCTL_GET_DATA_TRACK_SECTOR_SIZE);
-	fs_ioctl(fd, &info->toc, ISOFS_IOCTL_GET_TOC_DATA);
+	fs_ioctl(fd, ISOFS_IOCTL_GET_FD_LBA, &info->exec.lba);
+	fs_ioctl(fd, ISOFS_IOCTL_GET_IMAGE_TYPE, &info->image_type);
+	fs_ioctl(fd, ISOFS_IOCTL_GET_DATA_TRACK_LBA, &info->track_lba[0]);
+	fs_ioctl(fd, ISOFS_IOCTL_GET_DATA_TRACK_SECTOR_SIZE, &info->sector_size);
+	fs_ioctl(fd, ISOFS_IOCTL_GET_TOC_DATA, &info->toc);
 
 	if(info->image_type == ISOFS_IMAGE_TYPE_CDI) {
 
 		uint32 *offset = (uint32 *)sec;
-		fs_ioctl(fd, offset, ISOFS_IOCTL_GET_CDDA_OFFSET);
+		fs_ioctl(fd, ISOFS_IOCTL_GET_CDDA_OFFSET, offset);
 		memcpy_sh4(&info->cdda_offset, offset, sizeof(info->cdda_offset));
 		memset_sh4(&sec, 0, sizeof(sec));
 
-		fs_ioctl(fd, &info->track_offset, ISOFS_IOCTL_GET_DATA_TRACK_OFFSET);
+		fs_ioctl(fd, ISOFS_IOCTL_GET_DATA_TRACK_OFFSET, &info->track_offset);
 	}
 
 	if(info->image_type == ISOFS_IMAGE_TYPE_CSO ||
@@ -203,16 +203,16 @@ static int get_image_info(isoldr_info_t *info, const char *iso_file, int use_gdt
 
 		uint32 ptr = 0;
 
-		if(!fs_ioctl(fd, &ptr, ISOFS_IOCTL_GET_IMAGE_HEADER_PTR) && ptr != 0) {
+		if(!fs_ioctl(fd, ISOFS_IOCTL_GET_IMAGE_HEADER_PTR, &ptr) && ptr != 0) {
 			memcpy_sh4(&info->ciso, (void*)ptr, sizeof(CISO_header_t));
 		}
 	}
 
 	if(info->image_type == ISOFS_IMAGE_TYPE_GDI) {
 
-		fs_ioctl(fd, sec, ISOFS_IOCTL_GET_DATA_TRACK_FILENAME);
-		fs_ioctl(fd, info->image_second, ISOFS_IOCTL_GET_DATA_TRACK_FILENAME2);
-		fs_ioctl(fd, &info->track_lba[1], ISOFS_IOCTL_GET_DATA_TRACK_LBA2);
+		fs_ioctl(fd, ISOFS_IOCTL_GET_DATA_TRACK_FILENAME, sec);
+		fs_ioctl(fd, ISOFS_IOCTL_GET_DATA_TRACK_FILENAME2, info->image_second);
+		fs_ioctl(fd, ISOFS_IOCTL_GET_DATA_TRACK_LBA2, &info->track_lba[1]);
 
 		psec = strchr(psec + 1, '/');
 
@@ -495,7 +495,7 @@ void isoldr_exec_dcio(isoldr_info_t *info, const char *file) {
 		return;
 	}
 
-	if(fs_ioctl(fd, &lba, FATFS_IOCTL_GET_FD_LBA) < 0) {
+	if(fs_ioctl(fd, FATFS_IOCTL_GET_FD_LBA, &lba) < 0) {
 		fs_close(fd);
 		ds_printf("DS_ERROR: Can't get file LBA: %d\n", errno);
 		return;
@@ -531,14 +531,15 @@ void isoldr_exec_dcio(isoldr_info_t *info, const char *file) {
 int builtin_isoldr_cmd(int argc, char *argv[]) {
 
 	if(argc < 2) {
-
 		ds_printf("\n  ## ISO Loader v%d.%d.%d build %d ##\n\n"
 		          "Usage: %s options args\n"
 		          "Options: \n", VER_MAJOR, VER_MINOR, VER_MICRO, VER_BUILD, argv[0]);
 		ds_printf(" -s, --fast       -Fast boot mode (don't show any info on screen)\n",
 		          " -i, --verbose    -Show additional info\n",
 		          " -a, --dma        -Use DMA transfer if available\n"
-		          " -c, --cdda       -Emulate CDDA audio\n");
+		          " -q, --irq        -Use IRQ handling injection\n"
+		          " -c, --cdda       -Emulate CDDA audio\n"
+		          " -s, --fast       -Don't show loader text and disc texture on screen\n");
 		ds_printf("Arguments: \n"
 		          " -e, --async      -Emulate async reading, 0=none default, >0=sectors per frame\n"
 		          " -d, --device     -Loader device (sd/ide/cd/dcl/dcio), default auto\n"
@@ -557,6 +558,15 @@ int builtin_isoldr_cmd(int argc, char *argv[]) {
 		          "                      3 = WINCE\n");
 		ds_printf(" -r, --addr       -Executable memory address (default 0xac010000)\n"
 		          " -b, --boot       -Executable file name (default from IP.BIN)\n");
+		ds_printf(" -m, --buffer     -Buffer mode or memory address\n"
+		          "                      0 = static (default, uses some hardcoded memory variants)\n"
+		          "                      1 = dynamic (ingame memory allocation)\n"
+		          "                     0x = address (specify valid address)\n");
+		ds_printf(" -g, --cddamode   -CDDA emulation mode\n"
+		          "                      1 = DMA and TMU2 (default)\n"
+		          "                      2 = DMA and TMU1\n"
+		          "                      3 = SQ and TMU2\n"
+		          "                      4 = SQ and TMU1\n");
 		ds_printf("     --pa1        -Patch address 1\n"
 		          "     --pa2        -Patch address 2\n"
 		          "     --pv1        -Patch value 1\n"
@@ -567,16 +577,15 @@ int builtin_isoldr_cmd(int argc, char *argv[]) {
 
 	uint32 p_addr[2]  = {0, 0};
 	uint32 p_value[2] = {0, 0};
-	uint32 addr = 0, use_dma = 0, lex = 0;
+	uint32 addr = 0, use_dma = 0, lex = 0, buff_mode = BUFF_MEM_STATIC;
 	char *file = NULL, *bin_file = NULL, *device = NULL, *fstype = NULL;
-	int emu_async = 0, emu_cdda = 0, boot_mode = BOOT_MODE_DIRECT;
-	int bin_type = BIN_TYPE_AUTO, nogdtex = 0,
-	    fast_boot = 0, fspart = -1, verbose = 0;
-
+	uint32 emu_async = 0, emu_cdda = 0, boot_mode = BOOT_MODE_DIRECT;
+	uint32 bin_type = BIN_TYPE_AUTO, fast_boot = 0, verbose = 0;
+	uint32 cdda_mode = CDDA_MODE_DMA_TMU2, use_irq = 0;
+	int fspart = -1;
 	isoldr_info_t *info;
 
 	struct cfg_option options[] = {
-		{"nogdtex",   'n', NULL, CFG_BOOL,  (void *) &nogdtex,     0}, /* Deprecated */
 		{"verbose",   'i', NULL, CFG_BOOL,  (void *) &verbose,     0},
 		{"dma",       'a', NULL, CFG_BOOL,  (void *) &use_dma,     0},
 		{"device",    'd', NULL, CFG_STR,   (void *) &device,      0},
@@ -585,12 +594,15 @@ int builtin_isoldr_cmd(int argc, char *argv[]) {
 		{"memory",    'x', NULL, CFG_ULONG, (void *) &lex,         0},
 		{"addr",      'r', NULL, CFG_ULONG, (void *) &addr,        0},
 		{"file",      'f', NULL, CFG_STR,   (void *) &file,        0},
-		{"async",     'e', NULL, CFG_INT,   (void *) &emu_async,   0},
+		{"async",     'e', NULL, CFG_ULONG, (void *) &emu_async,   0},
 		{"cdda",      'c', NULL, CFG_BOOL,  (void *) &emu_cdda,    0},
-		{"jmp",       'j', NULL, CFG_INT,   (void *) &boot_mode,   0},
-		{"os",        'o', NULL, CFG_INT,   (void *) &bin_type,    0},
+		{"cddamode",  'g', NULL, CFG_ULONG, (void *) &cdda_mode,   0},
+		{"buffer",    'm', NULL, CFG_ULONG, (void *) &buff_mode,   0},
+		{"jmp",       'j', NULL, CFG_ULONG, (void *) &boot_mode,   0},
+		{"os",        'o', NULL, CFG_ULONG, (void *) &bin_type,    0},
 		{"boot",      'b', NULL, CFG_STR,   (void *) &bin_file,    0},
-		{"fast",      's', NULL, CFG_INT,   (void *) &fast_boot,   0},
+		{"fast",      's', NULL, CFG_BOOL,  (void *) &fast_boot,   0},
+		{"irq",       'q', NULL, CFG_BOOL,  (void *) &use_irq,     0},
 		{"pa1",      '\0', NULL, CFG_ULONG, (void *) &p_addr[0],   0},
 		{"pa2",      '\0', NULL, CFG_ULONG, (void *) &p_addr[1],   0},
 		{"pv1",      '\0', NULL, CFG_ULONG, (void *) &p_value[0],  0},
@@ -613,11 +625,7 @@ int builtin_isoldr_cmd(int argc, char *argv[]) {
 		}
 	}
 
-	if(fast_boot) {
-		nogdtex = 1;
-	}
-
-	info = isoldr_get_info(file, nogdtex ? 0 : 1);
+	info = isoldr_get_info(file, fast_boot ? 0 : 1);
 
 	if(info == NULL) {
 		return CMD_ERROR;
@@ -659,9 +667,11 @@ int builtin_isoldr_cmd(int argc, char *argv[]) {
 
 	info->boot_mode = boot_mode;
 	info->emu_async = emu_async;
-	info->emu_cdda  = emu_cdda;
+	info->emu_cdda  = (emu_cdda ? cdda_mode : emu_cdda);
 	info->use_dma   = use_dma;
 	info->fast_boot = fast_boot;
+	info->buff_mode = buff_mode;
+	info->use_irq   = use_irq;
 	
 	info->patch_addr[0]  = p_addr[0];
 	info->patch_addr[1]  = p_addr[1];
@@ -702,12 +712,14 @@ int builtin_isoldr_cmd(int argc, char *argv[]) {
 		          "Device: %s\n "
 		          "Filesystem: %s (partition %d)\n "
 		          "Address: 0x%08lx\n "
+		          "Buffer: %lx\n "
 		          "Emu async: %d\n "
 		          "Emu CDDA: %d\n\n",
 		          info->fs_dev,
 		          info->fs_type,
 		          info->fs_part,
 		          lex,
+		          info->buff_mode,
 		          info->emu_async,
 		          info->emu_cdda);
 	}
